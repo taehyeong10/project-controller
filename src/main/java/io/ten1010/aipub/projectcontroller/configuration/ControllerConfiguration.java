@@ -24,6 +24,7 @@ import io.ten1010.aipub.projectcontroller.controller.rbac.member.ClusterRoleBind
 import io.ten1010.aipub.projectcontroller.controller.rbac.member.ClusterRoleControllerFactory;
 import io.ten1010.aipub.projectcontroller.controller.rbac.member.RoleBindingControllerFactory;
 import io.ten1010.aipub.projectcontroller.controller.rbac.member.RoleControllerFactory;
+import io.ten1010.aipub.projectcontroller.controller.webhook.UserLabelWebhookConfigurationControllerFactory;
 import io.ten1010.aipub.projectcontroller.controller.workload.CompositeWorkloadControllerNodesResolver;
 import io.ten1010.aipub.projectcontroller.controller.workload.CronJobInformerRegistrar;
 import io.ten1010.aipub.projectcontroller.controller.workload.CronJobWorkloadControllerFactory;
@@ -46,6 +47,7 @@ import io.ten1010.aipub.projectcontroller.domain.k8s.K8sApiProvider;
 import io.ten1010.aipub.projectcontroller.domain.k8s.K8sObjectType;
 import io.ten1010.aipub.projectcontroller.domain.k8s.ReconciliationService;
 import io.ten1010.aipub.projectcontroller.domain.k8s.dto.V1alpha1Project;
+import io.ten1010.aipub.projectcontroller.informer.dynamic.DynamicCrInformerManager;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -106,9 +108,10 @@ public class ControllerConfiguration {
   @Bean
   public Controller aipubUserClusterRoleController(SharedInformerFactory sharedInformerFactory,
       K8sApiProvider k8sApiProvider,
-      ReconciliationService reconciliationService) {
+      ReconciliationService reconciliationService,
+      DynamicCrInformerManager dynamicCrInformerManager) {
     return new AipubUserClusterRoleControllerFactory(sharedInformerFactory, k8sApiProvider,
-        reconciliationService)
+        reconciliationService, dynamicCrInformerManager)
         .createController();
   }
 
@@ -125,9 +128,19 @@ public class ControllerConfiguration {
   @Bean
   public Controller aipubUserRoleController(SharedInformerFactory sharedInformerFactory,
       K8sApiProvider k8sApiProvider,
-      ReconciliationService reconciliationService) {
+      ReconciliationService reconciliationService,
+      DynamicCrInformerManager dynamicCrInformerManager) {
     return new AipubUserRoleControllerFactory(sharedInformerFactory, k8sApiProvider,
-        reconciliationService)
+        reconciliationService, dynamicCrInformerManager)
+        .createController();
+  }
+
+  @Bean
+  public Controller userLabelWebhookConfigurationController(
+      SharedInformerFactory sharedInformerFactory,
+      K8sApiProvider k8sApiProvider) {
+    return new UserLabelWebhookConfigurationControllerFactory(sharedInformerFactory,
+        k8sApiProvider)
         .createController();
   }
 

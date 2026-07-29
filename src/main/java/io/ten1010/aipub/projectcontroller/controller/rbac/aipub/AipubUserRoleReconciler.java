@@ -20,6 +20,7 @@ import io.ten1010.aipub.projectcontroller.domain.k8s.AipubUserRoleNameResolver;
 import io.ten1010.aipub.projectcontroller.domain.k8s.K8sApiProvider;
 import io.ten1010.aipub.projectcontroller.domain.k8s.KeyResolver;
 import io.ten1010.aipub.projectcontroller.domain.k8s.NamespaceNameResolver;
+import io.ten1010.aipub.projectcontroller.domain.k8s.OwnedCrObject;
 import io.ten1010.aipub.projectcontroller.domain.k8s.ReconciliationService;
 import io.ten1010.aipub.projectcontroller.domain.k8s.RoleNameResolver;
 import io.ten1010.aipub.projectcontroller.domain.k8s.dto.V1beta1Workspace;
@@ -33,6 +34,7 @@ import io.ten1010.aipub.projectcontroller.domain.k8s.dto.V1alpha1SftpServer;
 import io.ten1010.aipub.projectcontroller.domain.k8s.util.K8sObjectUtils;
 import io.ten1010.aipub.projectcontroller.domain.k8s.util.ProjectUtils;
 import io.ten1010.aipub.projectcontroller.informer.IndexerConstants;
+import io.ten1010.aipub.projectcontroller.informer.dynamic.DynamicCrInformerManager;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -60,11 +62,13 @@ public class AipubUserRoleReconciler extends AbstractReconciler {
   private final Indexer<V1alpha1ImageBuild> imageBuildIndexer;
   private final BoundObjectResolver boundObjectResolver;
   private final RbacAuthorizationV1Api rbacAuthorizationV1Api;
+  private final DynamicCrInformerManager dynamicCrInformerManager;
 
   public AipubUserRoleReconciler(
       SharedInformerFactory sharedInformerFactory,
       K8sApiProvider k8sApiProvider,
-      ReconciliationService reconciliationService
+      ReconciliationService reconciliationService,
+      DynamicCrInformerManager dynamicCrInformerManager
   ) {
     this.keyResolver = new KeyResolver();
     this.namespaceNameResolver = new NamespaceNameResolver();
@@ -105,6 +109,7 @@ public class AipubUserRoleReconciler extends AbstractReconciler {
         .getExistingSharedIndexInformer(V1alpha1ImageBuild.class)
         .getIndexer();
     this.boundObjectResolver = new BoundObjectResolver(sharedInformerFactory);
+    this.dynamicCrInformerManager = dynamicCrInformerManager;
     this.rbacAuthorizationV1Api = new RbacAuthorizationV1Api(k8sApiProvider.getApiClient());
   }
 
@@ -170,8 +175,10 @@ public class AipubUserRoleReconciler extends AbstractReconciler {
 
     List<V1OwnerReference> reconciledReferences = this.reconciliationService.reconcileOwnerReferences(
         roleOpt.orElse(null), userOpt.get());
+    List<OwnedCrObject> ownedCrObjects = this.dynamicCrInformerManager
+        .getNamespacedOwnedObjects(request.getNamespace(), username);
     List<V1PolicyRule> reconciledRules = this.reconciliationService.reconcileAipubUserRoleRules(
-        userOpt.get(), projectOpt.get(), workloads);
+        userOpt.get(), projectOpt.get(), workloads, ownedCrObjects);
 
     if (roleOpt.isPresent()) {
       String projNameFromRoleName = K8sObjectUtils.getName(projectOpt.get());
