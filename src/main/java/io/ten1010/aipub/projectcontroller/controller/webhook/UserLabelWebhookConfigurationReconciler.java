@@ -102,7 +102,7 @@ public class UserLabelWebhookConfigurationReconciler extends AbstractReconciler 
             .withApiVersions("*")
             .withOperations("CREATE")
             .withResources("pods", "replicationcontrollers", "services", "configmaps", "secrets",
-                "persistentvolumeclaims")
+                "persistentvolumeclaims", "serviceaccounts", "limitranges")
             .withScope("Namespaced")
             .build(),
         new V1RuleWithOperationsBuilder()
@@ -110,6 +110,20 @@ public class UserLabelWebhookConfigurationReconciler extends AbstractReconciler 
             .withApiVersions("*")
             .withOperations("CREATE")
             .withResources("ingresses")
+            .withScope("Namespaced")
+            .build(),
+        new V1RuleWithOperationsBuilder()
+            .withApiGroups("autoscaling")
+            .withApiVersions("*")
+            .withOperations("CREATE")
+            .withResources("horizontalpodautoscalers")
+            .withScope("Namespaced")
+            .build(),
+        new V1RuleWithOperationsBuilder()
+            .withApiGroups("policy")
+            .withApiVersions("*")
+            .withOperations("CREATE")
+            .withResources("poddisruptionbudgets")
             .withScope("Namespaced")
             .build(),
         new V1RuleWithOperationsBuilder()

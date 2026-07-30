@@ -43,12 +43,22 @@ webhooks:
       - apiGroups: [ "" ]
         apiVersions: [ "*" ]
         operations: [ "CREATE" ]
-        resources: [ "pods", "replicationcontrollers", "services", "configmaps", "secrets", "persistentvolumeclaims" ]
+        resources: [ "pods", "replicationcontrollers", "services", "configmaps", "secrets", "persistentvolumeclaims", "serviceaccounts", "limitranges" ]
         scope: "Namespaced"
       - apiGroups: [ "networking.k8s.io" ]
         apiVersions: [ "*" ]
         operations: [ "CREATE" ]
         resources: [ "ingresses" ]
+        scope: "Namespaced"
+      - apiGroups: [ "autoscaling" ]
+        apiVersions: [ "*" ]
+        operations: [ "CREATE" ]
+        resources: [ "horizontalpodautoscalers" ]
+        scope: "Namespaced"
+      - apiGroups: [ "policy" ]
+        apiVersions: [ "*" ]
+        operations: [ "CREATE" ]
+        resources: [ "poddisruptionbudgets" ]
         scope: "Namespaced"
       - apiGroups: [ "batch" ]
         apiVersions: [ "*" ]
