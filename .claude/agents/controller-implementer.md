@@ -43,7 +43,11 @@ description: "project-controller의 코드 구현 전문가. Kubernetes 리컨�
 1. `AbstractReconciler`를 상속하고, 생성자에서 `SharedInformerFactory.getExistingSharedIndexInformer(V1alpha1Xxx.class).getIndexer()`로 필요한 `Indexer`를 받아온다.
 2. CR 상태(status subresource) 갱신은 반드시 `StatusPatchHelper<V1alpha1Xxx>`를 통해서만 한다 — `GenericKubernetesApi`의 `replaceStatus`를 직접 호출하지 않는다(경합·재시도 처리가 헬퍼에 캡슐화돼 있어 직접 호출 시 그 안전장치를 잃는다).
 3. 리컨실러를 만들면 대응하는 `*ControllerFactory`(예: `ProjectControllerFactory` 패턴)를 만들거나 기존 Factory에 배선을 추가해, informer + workqueue + 리컨실러가 실제로 연결되게 한다. Factory 배선 없이 리컨실러 클래스만 만들면 아무 이벤트도 받지 못하는 죽은 코드가 된다.
-4. **리컨실 루프는 반드시 멱등이어야 한다** — 같은 이벤트로 여러 번 호출되거나(K8s 컨트롤러의 기본 전제), 재시작 후 재큐잉되어도 부작용이 중복되지 않아야 한다. 외부 부수효과(aipub-backend API 호출 등)를 넣을 때는 특히 이 원칙을 지킨다.
+4. **새 CRD라면 반드시 두 곳을 함께 수정한다** (하나만 하면 컴파일은 되는데 런타임에 리컨실러가 아무것도 못 받거나 K8s API를 호출할 방법이 없는 상태가 된다):
+   - `informer/SharedInformerFactoryProvider.createSharedInformerFactory()`에 새 CRD informer 등록 코드 추가 — `informer/InformerRegistrar` 인터페이스는 워크로드(CronJob/Deployment 등) 전용이라 CRD엔 쓰지 않는다.
+   - `domain/k8s/K8sApiProvider.java`에 새 CRD의 `GenericKubernetesApi<V1alphaXxx, V1alphaXxxList>` 필드 + private factory 메서드 추가.
+   - 새 CRD의 API 그룹은 `domain/k8s/ProjectApiConstants`의 기존 3개 그룹(`PROJECT_GROUP`/`AIPUB_GROUP`/`COASTER_GROUP`) 중 어디에 속하는지 먼저 확인하고, 임의로 새 그룹 문자열을 짓지 않는다.
+5. **리컨실 루프는 반드시 멱등이어야 한다** — 같은 이벤트로 여러 번 호출되거나(K8s 컨트롤러의 기본 전제), 재시작 후 재큐잉되어도 부작용이 중복되지 않아야 한다. 외부 부수효과(aipub-backend API 호출 등)를 넣을 때는 특히 이 원칙을 지킨다.
 
 ### 뮤테이팅 웹훅 핸들러 구현 패턴
 1. `mutating/service/`의 기존 핸들러(`UserOwnerReviewHandler`, `UserAuthorityReviewMutateHandler` 등)를 참고해 동일한 인터페이스/체인 방식을 따른다.

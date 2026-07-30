@@ -55,6 +55,9 @@ domain/
 - 모든 리컨실러는 `AbstractReconciler`를 상속하고, 해당 CR의 `Indexer<V1alpha1Xxx>`를 `SharedInformerFactory.getExistingSharedIndexInformer(...).getIndexer()`로 받아온다.
 - CR 상태(status subresource) 갱신은 `StatusPatchHelper<V1alpha1Xxx>`를 통해서만 한다 — 직접 `replaceStatus` 호출 금지(경합 상태/재시도 처리가 헬퍼에 캡슐화돼 있음).
 - 각 CR마다 `*ControllerFactory`(예: `ProjectControllerFactory`, `NodeGroupControllerFactory`)가 리컨실러 + informer + workqueue를 배선한다. 새 CR 리컨실러를 추가하면 대응하는 Factory도 함께 만든다.
+- **CRD informer 등록은 `InformerRegistrar`가 아니다** — `informer/InformerRegistrar` 인터페이스는 `controller/workload/`의 K8s 내장 워크로드(CronJob/DaemonSet/Deployment/ReplicaSet/Job/StatefulSet) 전용이다. CRD(Project/NodeGroup/ImageHub 등) informer는 `informer/SharedInformerFactoryProvider.createSharedInformerFactory()` 안에 CRD별로 하드코딩되어 있다. 새 CRD를 추가하면 이 메서드에 등록 코드를 직접 추가해야 하며, `InformerRegistrar` 구현체를 만드는 방향으로 접근하면 잘못된 패턴이다.
+- **새 CRD 추가 시 `domain/k8s/K8sApiProvider.java`도 반드시 함께 수정**해야 한다 — 이 클래스가 CRD별 `GenericKubernetesApi<V1alphaXxx, V1alphaXxxList>` 필드와 그걸 만드는 private factory 메서드를 모아둔 곳이다. 새 CRD의 API 필드/factory 메서드가 없으면 리컨실러가 K8s API를 호출할 방법이 없다.
+- **API 그룹이 하나가 아니다** — `domain/k8s/ProjectApiConstants`에 `PROJECT_GROUP`(`project.aipub.ten1010.io`), `AIPUB_GROUP`(`aipub.ten1010.io`), `COASTER_GROUP`(`coaster.ten1010.io`) 3개가 따로 정의돼 있다. 새 CRD의 그룹을 아무 이름이나 새로 만들지 말고, 어느 기존 그룹에 속하는 리소스인지(또는 정말 새 그룹이 필요한지) 먼저 확인한다.
 - K8s 타입은 공식 client-java의 `V1*` 네이밍(`V1Namespace`, `V1ResourceQuota` 등)을, CRD 타입은 이 프로젝트가 정의한 `V1alpha1*` 네이밍(`V1alpha1Project`, `V1alpha1ImageHub` 등)을 따른다.
 - Nullable 표기는 `org.jspecify.annotations.Nullable` 사용(javax/jakarta 아님).
 - Lombok 사용하되 `@Data`는 JPA 엔티티가 없는 프로젝트라 상대적으로 덜 위험하지만, 여전히 `@Getter`/`@Builder`/`@RequiredArgsConstructor` 위주로 관찰됨 — 기존 클래스의 실제 어노테이션 조합을 확인하고 따를 것.
@@ -78,8 +81,10 @@ domain/
 |------------|----------|------|
 | controller/cr/XxxReconciler.java | 신규/수정 | |
 | controller/cr/XxxControllerFactory.java | 신규/수정 | Factory 배선 |
-| informer/... | 수정 | 새 CR watch 등록 필요 시 |
+| informer/SharedInformerFactoryProvider.java | 수정 | 새 CRD informer 등록 시 (`InformerRegistrar`는 워크로드 전용, 여기 아님) |
+| domain/k8s/K8sApiProvider.java | 수정 | 새 CRD의 `GenericKubernetesApi` 필드 + factory 메서드 추가 |
 | domain/k8s/dto/V1alpha1Xxx.java | 신규/수정 | CRD 스펙 변경 시 |
+| domain/k8s/ProjectApiConstants.java | 확인 | 새 CRD가 속할 API 그룹(PROJECT/AIPUB/COASTER) 확인, 신규 그룹 필요 여부 판단 |
 | kubernetes/examples/*.yaml | 수정 | CRD 스펙 변경 시 예시도 갱신 |
 
 ## 주의사항
