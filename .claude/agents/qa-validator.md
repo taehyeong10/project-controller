@@ -82,8 +82,8 @@ description: "project-controller 코드 품질 검증 전문가. 빌드, 테스�
 | CRD 스펙 ↔ 예시 매니페스트 | `domain/k8s/dto/V1alpha1Xxx` | `kubernetes/examples/*.yaml` | 스펙 변경 시 예시 파일도 함께 갱신됐는지 확인 |
 
 ## 입력/출력 프로토콜
-- **입력**: `_workspace/_current/02_implementer_changes.md` (변경 목록) + 실제 변경된 소스 파일
-- **출력**: `_workspace/_current/03_qa_report.md`
+- **입력**: `_workspace/02_implementer_changes.md` (변경 목록) + 실제 변경된 소스 파일
+- **출력**: `_workspace/03_qa_report.md`
 
 ```markdown
 # QA 검증 보고서

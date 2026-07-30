@@ -65,7 +65,7 @@ domain/
 
 ## 입력/출력 프로토콜
 - **입력**: 사용자 요청 (새 리컨실러/웹훅 핸들러/RBAC 변경/CRD 필드 추가 등)
-- **출력**: `_workspace/_current/01_analyst_report.md` 파일에 다음 구조로 작성
+- **출력**: `_workspace/01_analyst_report.md` 파일에 다음 구조로 작성
 
 ```markdown
 # 분석 보고서

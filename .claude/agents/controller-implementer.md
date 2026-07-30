@@ -68,8 +68,8 @@ description: "project-controller의 코드 구현 전문가. Kubernetes 리컨�
 - 리컨실러 테스트가 아직 거의 없다(`mutating/service/` 위주로만 존재) — 새 리컨실러를 추가할 때는 최소한 핵심 리컨실 로직에 대한 단위 테스트를 새로 작성한다(기존 관행에 없다고 생략하지 않는다).
 
 ## 입력/출력 프로토콜
-- **입력**: `_workspace/_current/01_analyst_report.md` (분석 보고서) + 사용자 요청
-- **출력**: 직접 프로젝트 소스 파일을 생성/수정. 변경 목록을 `_workspace/_current/02_implementer_changes.md`에 기록
+- **입력**: `_workspace/01_analyst_report.md` (분석 보고서) + 사용자 요청
+- **출력**: 직접 프로젝트 소스 파일을 생성/수정. 변경 목록을 `_workspace/02_implementer_changes.md`에 기록
 
 ```markdown
 # 구현 변경 목록

@@ -15,9 +15,9 @@ project-controller(Kubernetes 리컨실러/뮤테이팅 웹훅 기반 컨트롤�
 
 | 팀원 | 에이전트 타입 | 역할 | 출력 |
 |------|-------------|------|------|
-| analyst | codebase-analyst | 코드베이스 분석, 패턴 질의 응답 | `_workspace/_current/01_analyst_report.md` |
-| implementer | controller-implementer | 리컨실러/웹훅/RBAC 구현 | 소스 파일 + `_workspace/_current/02_implementer_changes.md` |
-| qa | qa-validator | 빌드/테스트/컨벤션/멱등성/RBAC/웹훅 안전성 검증 | `_workspace/_current/03_qa_report.md` |
+| analyst | codebase-analyst | 코드베이스 분석, 패턴 질의 응답 | `_workspace/01_analyst_report.md` |
+| implementer | controller-implementer | 리컨실러/웹훅/RBAC 구현 | 소스 파일 + `_workspace/02_implementer_changes.md` |
+| qa | qa-validator | 빌드/테스트/컨벤션/멱등성/RBAC/웹훅 안전성 검증 | `_workspace/03_qa_report.md` |
 
 ## 팀 통신 구조
 
@@ -41,23 +41,23 @@ implementer ──수정 완료──→ qa (재검증 요청)
 
 워크플로우 시작 전 기존 작업 상태를 확인하여 실행 모드를 결정한다.
 
-1. `_workspace/_current/` 디렉토리 존재 여부 확인
+1. `_workspace/` 디렉토리 존재 여부 확인
 2. 존재 여부에 따라 실행 모드 분기:
-   - `_workspace/_current/` **미존재** → **초기 실행** — Phase 1부터 전체 실행
-   - `_workspace/_current/` **존재** + 사용자가 부분 수정 요청 → **부분 재실행** — 기존 분석 보고서 활용, 해당 에이전트만 재호출. Phase 2에서 재호출 대상 에이전트의 프롬프트를 조정한다 (예: analyst 미스폰 시 implementer 프롬프트에서 "analyst로부터 수신" 대기를 제거하고 기존 `01_analyst_report.md`를 직접 읽도록 지시).
-   - `_workspace/_current/` **존재** + 사용자가 새 기능 요청 → **새 실행** — 아래 "히스토리 로테이션" 절차로 이전 실행 내용을 보존한 후 Phase 1부터 실행
+   - `_workspace/` **미존재** → **초기 실행** — Phase 1부터 전체 실행
+   - `_workspace/` **존재** + 사용자가 부분 수정 요청 → **부분 재실행** — 기존 분석 보고서 활용, 해당 에이전트만 재호출. Phase 2에서 재호출 대상 에이전트의 프롬프트를 조정한다 (예: analyst 미스폰 시 implementer 프롬프트에서 "analyst로부터 수신" 대기를 제거하고 기존 `01_analyst_report.md`를 직접 읽도록 지시).
+   - `_workspace/` **존재** + 사용자가 새 기능 요청 → **새 실행** — 아래 "히스토리 로테이션" 절차로 이전 실행 내용을 보존한 후 Phase 1부터 실행
 3. 부분 재실행 시 기존 산출물(`01_analyst_report.md`, `02_implementer_changes.md`, `03_qa_report.md`)을 읽어 맥락을 파악
 
-**히스토리 로테이션 (여러 PC 간 공유 폴더 대응)**: `_workspace`는 프로젝트 루트에서 `~/Documents/claude/project_controller_workspace/`(공유 폴더) 전체를 가리키는 심볼릭 링크이고, 그 안의 `_current/`가 지금 실행 중인 작업 산출물이다. 심볼릭 링크는 컨테이너 전체를 가리키고 안 바뀌므로, 로테이션은 그 안에서 평범한 `mv`/`mkdir`만으로 끝난다(심볼릭 링크 resolve 불필요):
+**히스토리 로테이션**: `_workspace`는 `${PROJECT_HOME}/_workspace`(프로젝트 루트 기준 로컬 디렉토리)다.
 ```bash
-mv _workspace/_current "_workspace/_workspace_prev_$(date +%Y%m%d_%H%M%S)"
-mkdir _workspace/_current
+mv _workspace "_workspace_prev_$(date +%Y%m%d_%H%M%S)"
+mkdir _workspace
 ```
-공유 폴더가 이 머신에 아직 없다면(새 머신 최초 실행이자 `~/Documents/claude/bootstrap.sh` 미실행 상태), `_workspace`가 심볼릭 링크가 아닌 로컬 실디렉토리로 생성된다 — 이후 `bootstrap.sh` 실행 시 자동으로 공유 폴더로 이관되므로 문제 없다.
+`_workspace`를 개인 환경에서 다른 위치(예: 클라우드 동기화 폴더)에 심볼릭 링크로 연결해 여러 머신에 공유하는 건 개인의 선택이며, 이 스킬의 관심사가 아니다.
 
 ### Phase 1: 준비
 1. 사용자 입력 분석 — 어떤 리컨실러/웹훅 핸들러/RBAC 변경이 필요한지 파악
-2. 작업 디렉토리에 `_workspace/_current/` 생성 (Phase 0에서 이미 존재하면 건너뜀)
+2. 작업 디렉토리에 `_workspace/` 생성 (Phase 0에서 이미 존재하면 건너뜀)
 3. 변경 범위 판단 — 단일 파일(리컨실러 1개 또는 핸들러 1개)인지, 여러 컴포넌트에 걸친 변경인지
 
 **단일 파일 변경** (기존 리컨실러 1개 또는 웹훅 핸들러 1개만 수정, 새 CRD/Factory 배선 불필요): 분석 작업을 경량화하고 implementer + qa 2인 팀으로 구성 가능.
@@ -77,7 +77,7 @@ TeamCreate(
 요청: {사용자 요청}
 
 .claude/agents/codebase-analyst.md를 읽고 역할과 프로토콜을 따르라.
-_workspace/_current/01_analyst_report.md에 분석 보고서를 작성하라.
+_workspace/01_analyst_report.md에 분석 보고서를 작성하라.
 
 분석 완료 후 implementer에게 SendMessage로 핵심 발견을 요약 전달하라.
 이후 implementer와 qa의 패턴 질문에 응답하라."
@@ -95,7 +95,7 @@ analyst로부터 분석 결과를 수신한 뒤 구현을 시작하라.
 
 리컨실러/웹훅 핸들러/RBAC 컨트롤러 등 논리적 단위가 완성될 때마다 qa에게 SendMessage로 검증 요청하라.
 qa의 피드백을 수신하면 즉시 수정하고 재검증 요청하라.
-변경 목록을 _workspace/_current/02_implementer_changes.md에 기록하라."
+변경 목록을 _workspace/02_implementer_changes.md에 기록하라."
     },
     {
       name: "qa",
@@ -110,7 +110,7 @@ implementer로부터 구현 완료 알림을 수신하면 즉시 검증을 시�
 
 문제 발견 시 implementer에게 SendMessage로 구체적 수정 요청을 보내라.
 단순 컴파일 에러는 직접 수정하라.
-최종 결과를 _workspace/_current/03_qa_report.md에 기록하라."
+최종 결과를 _workspace/03_qa_report.md에 기록하라."
     }
   ]
 )
@@ -167,7 +167,7 @@ TaskCreate(tasks: [
 
 ### Phase 5: 결과 수집 및 보고
 1. 모든 작업 완료 대기 (TaskGet으로 확인)
-2. `_workspace/_current/03_qa_report.md` Read
+2. `_workspace/03_qa_report.md` Read
 3. QA 종합 판정 확인:
    - **PASS**: 사용자에게 변경 목록 + 검증 결과 요약 보고
    - **FAIL**: 미해결 문제를 분석하고 implementer에게 SendMessage로 추가 수정 요청. 최대 1회 재시도 후에도 FAIL이면 사용자에게 문제 상세 보고.
@@ -193,7 +193,7 @@ QA PASS 후 `${PROJECT_HOME}/docs/{작업명}/` 디렉토리를 생성하고 다
 
 **작성 원칙**:
 - 각 문서는 자체 완결적이어야 한다. 다른 문서를 참조하지 않고도 해당 관점에서 작업을 이해할 수 있어야 한다.
-- QA 보고서는 `_workspace/_current/03_qa_report.md`의 내용을 기반으로 정리한다.
+- QA 보고서는 `_workspace/03_qa_report.md`의 내용을 기반으로 정리한다.
 - PR 문구는 GitHub PR 생성 시 바로 복사해서 사용할 수 있는 형태로 작성한다.
 - CRD 스펙을 변경했다면 `kubernetes/examples/*.yaml` 예시도 함께 갱신됐는지 구현 문서에서 확인 표기한다.
 
@@ -223,7 +223,7 @@ QA PASS 후 `${PROJECT_HOME}/docs/{작업명}/` 디렉토리를 생성하고 다
 ```
 [리더: Phase 0 컨텍스트 감사] → 초기/부분 재실행/새 실행 판단
         ↓
-[analyst] 코드베이스 분석 → _workspace/_current/01_analyst_report.md
+[analyst] 코드베이스 분석 → _workspace/01_analyst_report.md
         ↓ SendMessage
 [implementer] 리컨실러/웹훅/RBAC 구현 → 단위별 완성 알림
         ↓ SendMessage                        ↑ 재검증 요청
