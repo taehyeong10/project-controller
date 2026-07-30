@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import io.kubernetes.client.openapi.models.V1CustomResourceDefinition;
 import io.kubernetes.client.openapi.models.V1CustomResourceDefinitionBuilder;
+import io.ten1010.aipub.projectcontroller.domain.k8s.DynamicCrConstants;
+import io.ten1010.aipub.projectcontroller.domain.k8s.ResourceTarget;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
@@ -38,7 +40,7 @@ class DynamicCrInformerManagerTest {
 
   @Test
   void resolveTarget_picksStorageVersion() {
-    Optional<DynamicCrInformerManager.CrdTarget> target =
+    Optional<ResourceTarget> target =
         DynamicCrInformerManager.resolveTarget(crd("example.com", "widgets", "Namespaced", true));
 
     assertThat(target).isPresent();
@@ -50,11 +52,24 @@ class DynamicCrInformerManagerTest {
 
   @Test
   void resolveTarget_clusterScope_namespacedFalse() {
-    Optional<DynamicCrInformerManager.CrdTarget> target =
+    Optional<ResourceTarget> target =
         DynamicCrInformerManager.resolveTarget(crd("example.com", "widgets", "Cluster", true));
 
     assertThat(target).isPresent();
     assertThat(target.get().namespaced()).isFalse();
+  }
+
+  // 네이티브 대상은 낙인 웹훅이 CREATE 를 인터셉트하는 네임스페이스 타입만 허용된다
+  @Test
+  void nativeOwnedTargets_areNamespaced_andExcludePlatformGroups() {
+    assertThat(DynamicCrConstants.NATIVE_OWNED_TARGETS)
+        .allSatisfy(target -> {
+          assertThat(target.namespaced()).isTrue();
+          assertThat(DynamicCrConstants.EXCLUDED_GROUPS).doesNotContain(target.group());
+        });
+    assertThat(DynamicCrConstants.NATIVE_OWNED_TARGETS)
+        .extracting(ResourceTarget::plural)
+        .contains("configmaps", "secrets", "services", "deployments");
   }
 
   @Test
