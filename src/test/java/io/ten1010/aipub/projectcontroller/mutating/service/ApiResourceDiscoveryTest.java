@@ -225,6 +225,48 @@ class ApiResourceDiscoveryTest {
     }
   }
 
+  // === getResourcesByKind — core groupVersions 버그 수정 검증 ===
+
+  @Nested
+  class GetResourcesByKind {
+
+    // 수정 전: core 루프가 groupVersions를 채우지 않아 core kind는 항상 빈 목록 반환.
+    // 수정 후: core groupResource("/pods" 등)에 "v1"이 기록되어 ResourceInfo("v1", plural) 반환.
+    @Test
+    void coreKind_returnsV1Resource() {
+      assertThat(discovery.getResourcesByKind("Pod"))
+          .containsExactly(new ApiResourceDiscovery.ResourceInfo("v1", "pods"));
+    }
+
+    @Test
+    void coreKind_namespacedService_returnsV1Resource() {
+      assertThat(discovery.getResourcesByKind("Service"))
+          .containsExactly(new ApiResourceDiscovery.ResourceInfo("v1", "services"));
+    }
+
+    @Test
+    void coreKind_clusterScoped_returnsV1Resource() {
+      assertThat(discovery.getResourcesByKind("Node"))
+          .containsExactly(new ApiResourceDiscovery.ResourceInfo("v1", "nodes"));
+    }
+
+    @Test
+    void nonCoreKind_returnsGroupVersionResource() {
+      assertThat(discovery.getResourcesByKind("Deployment"))
+          .containsExactly(new ApiResourceDiscovery.ResourceInfo("apps/v1", "deployments"));
+    }
+
+    @Test
+    void unknownKind_returnsEmptyList() {
+      assertThat(discovery.getResourcesByKind("Unknown")).isEmpty();
+    }
+
+    @Test
+    void coreGroupResource_getGroupVersion_returnsV1() {
+      assertThat(discovery.getGroupVersion("/pods")).isEqualTo("v1");
+    }
+  }
+
   // === isExist / isNamespaced 기본 동작 ===
 
   @Nested
