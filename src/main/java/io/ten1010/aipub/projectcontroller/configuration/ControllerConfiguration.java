@@ -62,12 +62,17 @@ public class ControllerConfiguration {
   @Bean
   public ControllerManager controllerManager(
       SharedInformerFactory sharedInformerFactory, List<Controller> controllers,
-      List<WorkloadControllerFactory<?>> workloadControllerFactories) {
+      List<WorkloadControllerFactory<?>> workloadControllerFactories,
+      DynamicCrInformerManager dynamicCrInformerManager) {
     ControllerManagerBuilder builder = ControllerBuilder.controllerManagerBuilder(
         sharedInformerFactory);
     controllers.forEach(builder::addController);
     workloadControllerFactories.forEach(f -> builder.addController(f.createController()));
     ControllerManager controllerManager = builder.build();
+
+    // 모든 컨트롤러 빌드가 끝나 개인 Role/ClusterRole 워크큐가 매니저에 등록된 뒤에
+    // 네이티브 소유권 인포머를 시작해야 초기 onAdd 이벤트가 유실되지 않는다
+    dynamicCrInformerManager.start();
 
     ExecutorService executor = Executors.newSingleThreadExecutor();
     executor.execute(controllerManager);

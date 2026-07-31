@@ -29,7 +29,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.Predicate;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.Call;
@@ -45,6 +44,13 @@ import org.jspecify.annotations.Nullable;
  */
 @Slf4j
 public class DynamicCrInformerManager {
+
+  /**
+   * 소유자 → 오브젝트 인덱스. 네임스페이스 타입은 "{namespace}/{username}",
+   * 클러스터 타입은 "{username}" 을 키로 사용한다. 이벤트 한 건이 트리거하는 리컨실이
+   * 전체 캐시 풀스캔 없이 해당 소유자의 오브젝트만 O(1) 로 조회하기 위한 것이다.
+   */
+  private static final String OWNER_TO_OBJECTS_INDEXER_NAME = "OWNER_TO_OBJECTS";
 
   private record TrackedTarget(ResourceTarget target, SharedInformerFactory informerFactory,
       SharedIndexInformer<V1PartialObject> informer) {
@@ -72,9 +78,6 @@ public class DynamicCrInformerManager {
         .getExistingSharedIndexInformer(V1ClusterRole.class)
         .getIndexer();
     this.trackedTargets = new ConcurrentHashMap<>();
-    for (ResourceTarget nativeTarget : DynamicCrConstants.NATIVE_OWNED_TARGETS) {
-      startTracking(trackingKey(nativeTarget.group(), nativeTarget.plural()), nativeTarget);
-    }
     sharedInformerFactory.getExistingSharedIndexInformer(V1CustomResourceDefinition.class)
         .addEventHandler(new ResourceEventHandler<>() {
 
@@ -97,28 +100,46 @@ public class DynamicCrInformerManager {
         });
   }
 
+  /**
+   * 네이티브 대상 추적을 시작한다. 인포머의 초기 onAdd 이벤트가 유실되지 않도록
+   * 개인 Role/ClusterRole 컨트롤러의 워크큐 등록이 끝난 뒤에 호출해야 한다
+   * (생성자에서 시작하면 큐 등록 전 이벤트가 버려져, 기동 초기 리컨실이 지운 규칙을
+   * 되살릴 트리거가 사라진다).
+   */
+  public synchronized void start() {
+    for (ResourceTarget nativeTarget : DynamicCrConstants.NATIVE_OWNED_TARGETS) {
+      String key = trackingKey(nativeTarget.group(), nativeTarget.plural());
+      if (!this.trackedTargets.containsKey(key)) {
+        startTracking(key, nativeTarget);
+      }
+    }
+  }
+
+  /**
+   * 모든 개인 Role/ClusterRole 을 재큐잉하는 주기 백스톱. 이벤트 경로가 어떤 이유로든
+   * 유실되어도(기동 레이스, 예기치 못한 드리프트) 다음 주기에 수렴을 보장한다.
+   */
+  public void resweepPersonalRoles() {
+    enqueueAllPersonalRoles(true);
+    enqueueAllPersonalRoles(false);
+  }
+
   public List<OwnedCrObject> getNamespacedOwnedObjects(String namespace, String aipubUserName) {
-    return getOwnedObjects(true, obj -> namespace.equals(resolveNamespace(obj)), aipubUserName);
+    return getOwnedObjects(true, ownerIndexKey(namespace, aipubUserName));
   }
 
   public List<OwnedCrObject> getClusterOwnedObjects(String aipubUserName) {
-    return getOwnedObjects(false, obj -> true, aipubUserName);
+    return getOwnedObjects(false, aipubUserName);
   }
 
-  private List<OwnedCrObject> getOwnedObjects(boolean namespaced,
-      Predicate<V1PartialObject> filter, String aipubUserName) {
+  private List<OwnedCrObject> getOwnedObjects(boolean namespaced, String ownerIndexKey) {
     List<OwnedCrObject> owned = new ArrayList<>();
     for (TrackedTarget tracked : this.trackedTargets.values()) {
       if (tracked.target().namespaced() != namespaced) {
         continue;
       }
-      for (V1PartialObject obj : tracked.informer().getIndexer().list()) {
-        if (!filter.test(obj)) {
-          continue;
-        }
-        if (UsernameUtils.getUsername(obj).filter(aipubUserName::equals).isEmpty()) {
-          continue;
-        }
+      for (V1PartialObject obj : tracked.informer().getIndexer()
+          .byIndex(OWNER_TO_OBJECTS_INDEXER_NAME, ownerIndexKey)) {
         owned.add(new OwnedCrObject(tracked.target().group(), tracked.target().plural(),
             K8sObjectUtils.getName(obj)));
       }
@@ -128,6 +149,10 @@ public class DynamicCrInformerManager {
         .thenComparing(OwnedCrObject::resource)
         .thenComparing(OwnedCrObject::name));
     return owned;
+  }
+
+  private static String ownerIndexKey(String namespace, String aipubUserName) {
+    return namespace + "/" + aipubUserName;
   }
 
   static Optional<ResourceTarget> resolveTarget(V1CustomResourceDefinition crd) {
@@ -197,6 +222,19 @@ public class DynamicCrInformerManager {
         (CallGeneratorParams params) -> buildListCall(target, params),
         V1PartialObject.class,
         V1PartialObjectList.class);
+    informer.addIndexers(Map.of(
+        OWNER_TO_OBJECTS_INDEXER_NAME,
+        obj -> UsernameUtils.getUsername(obj)
+            .map(username -> {
+              if (!target.namespaced()) {
+                return List.of(username);
+              }
+              String namespace = resolveNamespace(obj);
+              return namespace == null
+                  ? List.<String>of()
+                  : List.of(ownerIndexKey(namespace, username));
+            })
+            .orElse(List.of())));
     informer.addEventHandler(new ResourceEventHandler<>() {
 
       @Override
@@ -206,6 +244,11 @@ public class DynamicCrInformerManager {
 
       @Override
       public void onUpdate(V1PartialObject oldObj, V1PartialObject newObj) {
+        // 소유권 규칙은 (소유자, 오브젝트 이름)에만 의존하므로, username 레이블이
+        // 안 바뀐 update(status 갱신 등)는 리컨실을 트리거할 이유가 없다
+        if (UsernameUtils.getUsername(oldObj).equals(UsernameUtils.getUsername(newObj))) {
+          return;
+        }
         enqueueOwnerRole(target, oldObj);
         enqueueOwnerRole(target, newObj);
       }

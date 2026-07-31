@@ -5,6 +5,7 @@ import io.ten1010.aipub.projectcontroller.domain.k8s.K8sApiProvider;
 import io.ten1010.aipub.projectcontroller.informer.InformerRegistrar;
 import io.ten1010.aipub.projectcontroller.informer.SharedInformerFactoryProvider;
 import io.ten1010.aipub.projectcontroller.informer.dynamic.DynamicCrInformerManager;
+import io.ten1010.aipub.projectcontroller.informer.dynamic.OwnedObjectRoleResweeper;
 import java.util.List;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -23,6 +24,12 @@ public class InformerConfiguration {
   public DynamicCrInformerManager dynamicCrInformerManager(
       K8sApiProvider k8sApiProvider, SharedInformerFactory sharedInformerFactory) {
     return new DynamicCrInformerManager(k8sApiProvider.getApiClient(), sharedInformerFactory);
+  }
+
+  @Bean
+  public OwnedObjectRoleResweeper ownedObjectRoleResweeper(
+      DynamicCrInformerManager dynamicCrInformerManager) {
+    return new OwnedObjectRoleResweeper(dynamicCrInformerManager);
   }
 
 }
