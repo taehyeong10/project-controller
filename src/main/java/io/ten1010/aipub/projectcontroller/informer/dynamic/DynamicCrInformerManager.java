@@ -199,6 +199,9 @@ public class DynamicCrInformerManager {
       }
       stopTracking(key, existing);
     }
+    log.info("Detected CRD: name={}, group={}, version={}, plural={}, namespaced={}",
+        K8sObjectUtils.getName(crd), target.group(), target.version(), target.plural(),
+        target.namespaced());
     startTracking(key, target);
   }
 
@@ -213,6 +216,7 @@ public class DynamicCrInformerManager {
     if (tracked == null) {
       return;
     }
+    log.info("Removed CRD: name={}, key={}", K8sObjectUtils.getName(crd), key);
     stopTracking(key, tracked);
   }
 
@@ -239,6 +243,9 @@ public class DynamicCrInformerManager {
 
       @Override
       public void onAdd(V1PartialObject obj) {
+        log.info("Owned object created: group={}, resource={}, namespace={}, name={}, owner={}",
+            target.group(), target.plural(), resolveNamespace(obj), K8sObjectUtils.getName(obj),
+            UsernameUtils.getUsername(obj).orElse(""));
         enqueueOwnerRole(target, obj);
       }
 
@@ -249,12 +256,21 @@ public class DynamicCrInformerManager {
         if (UsernameUtils.getUsername(oldObj).equals(UsernameUtils.getUsername(newObj))) {
           return;
         }
+        log.info("Owned object ownership changed: group={}, resource={}, namespace={}, name={}, "
+                + "previousOwner={}, owner={}",
+            target.group(), target.plural(), resolveNamespace(newObj),
+            K8sObjectUtils.getName(newObj),
+            UsernameUtils.getUsername(oldObj).orElse(""),
+            UsernameUtils.getUsername(newObj).orElse(""));
         enqueueOwnerRole(target, oldObj);
         enqueueOwnerRole(target, newObj);
       }
 
       @Override
       public void onDelete(V1PartialObject obj, boolean deletedFinalStateUnknown) {
+        log.info("Owned object deleted: group={}, resource={}, namespace={}, name={}, owner={}",
+            target.group(), target.plural(), resolveNamespace(obj), K8sObjectUtils.getName(obj),
+            UsernameUtils.getUsername(obj).orElse(""));
         enqueueOwnerRole(target, obj);
       }
 
