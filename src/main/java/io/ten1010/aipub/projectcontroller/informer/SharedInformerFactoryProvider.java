@@ -3,6 +3,8 @@ package io.ten1010.aipub.projectcontroller.informer;
 import io.kubernetes.client.informer.SharedIndexInformer;
 import io.kubernetes.client.informer.SharedInformerFactory;
 import io.kubernetes.client.openapi.ApiClient;
+import io.kubernetes.client.openapi.apis.AdmissionregistrationV1Api;
+import io.kubernetes.client.openapi.apis.ApiextensionsV1Api;
 import io.kubernetes.client.openapi.apis.CoreV1Api;
 import io.kubernetes.client.openapi.apis.RbacAuthorizationV1Api;
 import io.kubernetes.client.openapi.models.V1ClusterRole;
@@ -10,6 +12,10 @@ import io.kubernetes.client.openapi.models.V1ClusterRoleBinding;
 import io.kubernetes.client.openapi.models.V1ClusterRoleBindingList;
 import io.kubernetes.client.openapi.models.RbacV1Subject;
 import io.kubernetes.client.openapi.models.V1ClusterRoleList;
+import io.kubernetes.client.openapi.models.V1CustomResourceDefinition;
+import io.kubernetes.client.openapi.models.V1CustomResourceDefinitionList;
+import io.kubernetes.client.openapi.models.V1MutatingWebhookConfiguration;
+import io.kubernetes.client.openapi.models.V1MutatingWebhookConfigurationList;
 import io.kubernetes.client.openapi.models.V1Namespace;
 import io.kubernetes.client.openapi.models.V1NamespaceList;
 import io.kubernetes.client.openapi.models.V1Node;
@@ -87,6 +93,8 @@ public class SharedInformerFactoryProvider {
     registerSftpServerInformer(informerFactory);
     registerImageBuildInformer(informerFactory);
     registerPodInformer(informerFactory);
+    registerCustomResourceDefinitionInformer(informerFactory);
+    registerMutatingWebhookConfigurationInformer(informerFactory);
     this.registrars.forEach(e -> e.registerInformer(informerFactory));
 
     return informerFactory;
@@ -369,6 +377,33 @@ public class SharedInformerFactoryProvider {
     informer.addIndexers(Map.of(
         IndexerConstants.NAMESPACE_TO_OBJECTS_INDEXER_NAME,
         obj -> List.of(K8sObjectUtils.getNamespace(obj))));
+  }
+
+  private void registerCustomResourceDefinitionInformer(SharedInformerFactory informerFactory) {
+    ApiClient apiClient = this.k8sApiProvider.getApiClient();
+    informerFactory.sharedIndexInformerFor(
+        (CallGeneratorParams params) -> new ApiextensionsV1Api(
+            apiClient).listCustomResourceDefinition()
+            .resourceVersion(params.resourceVersion)
+            .watch(params.watch)
+            .timeoutSeconds(params.timeoutSeconds)
+            .buildCall(null),
+        V1CustomResourceDefinition.class,
+        V1CustomResourceDefinitionList.class);
+  }
+
+  private void registerMutatingWebhookConfigurationInformer(
+      SharedInformerFactory informerFactory) {
+    ApiClient apiClient = this.k8sApiProvider.getApiClient();
+    informerFactory.sharedIndexInformerFor(
+        (CallGeneratorParams params) -> new AdmissionregistrationV1Api(
+            apiClient).listMutatingWebhookConfiguration()
+            .resourceVersion(params.resourceVersion)
+            .watch(params.watch)
+            .timeoutSeconds(params.timeoutSeconds)
+            .buildCall(null),
+        V1MutatingWebhookConfiguration.class,
+        V1MutatingWebhookConfigurationList.class);
   }
 
   private void registerPodInformer(SharedInformerFactory informerFactory) {

@@ -36,16 +36,29 @@ webhooks:
             - aipub-efk
     objectSelector: { }
     reinvocationPolicy: IfNeeded
+    # rules 는 부트스트랩 값이다. 기동 후에는 user-label-webhook-configuration-controller 가
+    # CRD 목록에 맞춰 rules 를 리컨실한다(CRD 그룹마다 scope "*" CREATE rule 추가).
+    # base rules 를 바꿀 때는 UserLabelWebhookConfigurationReconciler.baseRules() 도 함께 수정할 것.
     rules:
       - apiGroups: [ "" ]
         apiVersions: [ "*" ]
         operations: [ "CREATE" ]
-        resources: [ "pods", "replicationcontrollers", "services", "configmaps", "secrets", "persistentvolumeclaims" ]
+        resources: [ "pods", "replicationcontrollers", "services", "configmaps", "secrets", "persistentvolumeclaims", "serviceaccounts", "limitranges" ]
         scope: "Namespaced"
       - apiGroups: [ "networking.k8s.io" ]
         apiVersions: [ "*" ]
         operations: [ "CREATE" ]
         resources: [ "ingresses" ]
+        scope: "Namespaced"
+      - apiGroups: [ "autoscaling" ]
+        apiVersions: [ "*" ]
+        operations: [ "CREATE" ]
+        resources: [ "horizontalpodautoscalers" ]
+        scope: "Namespaced"
+      - apiGroups: [ "policy" ]
+        apiVersions: [ "*" ]
+        operations: [ "CREATE" ]
+        resources: [ "poddisruptionbudgets" ]
         scope: "Namespaced"
       - apiGroups: [ "batch" ]
         apiVersions: [ "*" ]

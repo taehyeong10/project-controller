@@ -16,10 +16,12 @@ import io.ten1010.aipub.projectcontroller.controller.RequestHelper;
 import io.ten1010.aipub.projectcontroller.domain.k8s.AipubUserRoleNameResolver;
 import io.ten1010.aipub.projectcontroller.domain.k8s.K8sApiProvider;
 import io.ten1010.aipub.projectcontroller.domain.k8s.KeyResolver;
+import io.ten1010.aipub.projectcontroller.domain.k8s.OwnedCrObject;
 import io.ten1010.aipub.projectcontroller.domain.k8s.ReconciliationService;
 import io.ten1010.aipub.projectcontroller.domain.k8s.dto.V1alpha1AipubUser;
 import io.ten1010.aipub.projectcontroller.domain.k8s.util.K8sObjectUtils;
 import io.ten1010.aipub.projectcontroller.domain.k8s.util.RoleUtils;
+import io.ten1010.aipub.projectcontroller.informer.dynamic.DynamicCrInformerManager;
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
@@ -35,14 +37,17 @@ public class AipubUserClusterRoleReconciler extends AbstractReconciler {
   private final Indexer<V1ClusterRole> clusterRoleIndexer;
   private final Indexer<V1alpha1AipubUser> userIndexer;
   private final RbacAuthorizationV1Api rbacAuthorizationV1Api;
+  private final DynamicCrInformerManager dynamicCrInformerManager;
 
   public AipubUserClusterRoleReconciler(
       SharedInformerFactory sharedInformerFactory,
       K8sApiProvider k8sApiProvider,
-      ReconciliationService reconciliationService) {
+      ReconciliationService reconciliationService,
+      DynamicCrInformerManager dynamicCrInformerManager) {
     this.keyResolver = new KeyResolver();
     this.roleNameResolver = new AipubUserRoleNameResolver();
     this.reconciliationService = reconciliationService;
+    this.dynamicCrInformerManager = dynamicCrInformerManager;
     this.clusterRoleIndexer = sharedInformerFactory
         .getExistingSharedIndexInformer(V1ClusterRole.class)
         .getIndexer();
@@ -77,8 +82,10 @@ public class AipubUserClusterRoleReconciler extends AbstractReconciler {
 
     List<V1OwnerReference> reconciledReferences = this.reconciliationService.reconcileOwnerReferences(
         roleOpt.orElse(null), userOpt.get());
+    List<OwnedCrObject> ownedCrObjects = this.dynamicCrInformerManager
+        .getClusterOwnedObjects(userName);
     List<V1PolicyRule> reconciledRules = this.reconciliationService.reconcileClusterRoleRules(
-        userOpt.get());
+        userOpt.get(), ownedCrObjects);
     V1AggregationRule reconciledAggregationRule = this.reconciliationService.reconcileClusterRoleAggregationRule(
         userOpt.get());
 
