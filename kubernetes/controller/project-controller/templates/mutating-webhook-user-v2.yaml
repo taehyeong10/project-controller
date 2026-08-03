@@ -47,6 +47,12 @@ webhooks:
         operations: [ "CREATE" ]
         resources: [ "pods", "replicationcontrollers", "services", "configmaps", "secrets", "persistentvolumeclaims", "serviceaccounts", "limitranges", "endpoints", "events" ]
         scope: "Namespaced"
+      # Event 는 core("") 와 events.k8s.io 두 API 로 생성될 수 있으므로 둘 다 인터셉트한다
+      - apiGroups: [ "events.k8s.io" ]
+        apiVersions: [ "*" ]
+        operations: [ "CREATE" ]
+        resources: [ "events" ]
+        scope: "Namespaced"
       - apiGroups: [ "networking.k8s.io" ]
         apiVersions: [ "*" ]
         operations: [ "CREATE" ]
