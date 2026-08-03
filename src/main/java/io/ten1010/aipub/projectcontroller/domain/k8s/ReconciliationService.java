@@ -839,7 +839,8 @@ public class ReconciliationService {
     List<V1PolicyRule> reconciledRules = new ArrayList<>(
         reconcileAipubUserRoleRules(aipubUser, project, workloads));
     for (OwnedObject ownedObject : ownedObjects) {
-      reconciledRules.add(buildOwnedObjectRoleRule(ownedObject));
+      reconciledRules.add(buildUpdateDeleteRoleRule(ownedObject.group(),
+          ownedObject.resource(), ownedObject.name()));
     }
     return reconciledRules;
   }
@@ -1163,14 +1164,6 @@ public class ReconciliationService {
         .withResources(resource)
         .withVerbs(UPDATABLE_VERBS)
         .withResourceNames(resourceName)
-        .build();
-  }
-
-  private V1PolicyRule buildOwnedObjectRoleRule(OwnedObject ownedObject) {
-    return new V1PolicyRuleBuilder().withApiGroups(ownedObject.group())
-        .withResources(ownedObject.resource())
-        .withVerbs(OwnershipPolicy.OWNED_VERBS)
-        .withResourceNames(ownedObject.name())
         .build();
   }
 
