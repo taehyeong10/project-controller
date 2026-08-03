@@ -147,6 +147,7 @@ public class ApiResourceDiscovery {
           String groupResource = "/" + name;
           plurals.put("v1/" + kind, name);
           namespacedInfo.put(groupResource, namespaced);
+          groupVersions.put(groupResource, "v1");
           groupResources.add(groupResource);
           kindDict.computeIfAbsent(kind, k -> new ArrayList<>()).add(groupResource);
           coreCount++;
