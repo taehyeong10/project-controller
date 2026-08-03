@@ -4,10 +4,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import okhttp3.Call;
 import okhttp3.MediaType;
 import okhttp3.Protocol;
@@ -293,6 +303,221 @@ class ApiResourceDiscoveryTest {
     @Test
     void coreAliasResource_doesNotExist() {
       assertThat(discovery.isExist("core/pods")).isFalse();
+    }
+  }
+
+  // === refresh-on-miss — 스냅샷 미스 시 targeted refresh ===
+
+  @Nested
+  class RefreshOnMiss {
+
+    // (a) 스냅샷 미스 → 해당 그룹만 targeted refresh → 히트.
+    // CRD 생성 직후 5분 주기 전체 refresh 전에 들어온 웹훅 요청이 400 거부되던 문제의 재현/수정 검증.
+    @Test
+    void missedGroup_targetedRefresh_thenHit() throws Exception {
+      mockApiCallRepeatable("/apis/qa-collision.ten1010.io", """
+          {
+            "kind": "APIGroup",
+            "name": "qa-collision.ten1010.io",
+            "versions": [
+              {"groupVersion": "qa-collision.ten1010.io/v1", "version": "v1"},
+              {"groupVersion": "qa-collision.ten1010.io/v2", "version": "v2"}
+            ]
+          }
+          """);
+      mockApiCallRepeatable("/apis/qa-collision.ten1010.io/v1", """
+          {
+            "resources": [
+              {"name": "qamultiversions", "kind": "QaMultiVersion", "namespaced": true}
+            ]
+          }
+          """);
+      mockApiCallRepeatable("/apis/qa-collision.ten1010.io/v2", """
+          {
+            "resources": [
+              {"name": "qamultiversions", "kind": "QaMultiVersion", "namespaced": true}
+            ]
+          }
+          """);
+
+      assertThat(discovery.isExist("qa-collision.ten1010.io/qamultiversions")).isTrue();
+      assertThat(discovery.isNamespaced("qa-collision.ten1010.io/qamultiversions")).isTrue();
+      assertThat(discovery.getGroupVersion("qa-collision.ten1010.io/qamultiversions"))
+          .isEqualTo("qa-collision.ten1010.io/v2");
+      // 병합이 기존 스냅샷 항목을 덮어쓰지 않음
+      assertThat(discovery.isExist("/pods")).isTrue();
+      assertThat(discovery.isExist("apps/deployments")).isTrue();
+      assertThat(discovery.getResourcesByKind("Deployment"))
+          .containsExactly(new ApiResourceDiscovery.ResourceInfo("apps/v1", "deployments"));
+      // 첫 miss의 targeted refresh 이후에는 스냅샷 히트 → 그룹 재조회 없음
+      verifyBuildCallCount("/apis/qa-collision.ten1010.io", 1);
+      verifyBuildCallCount("/apis/qa-collision.ten1010.io/v1", 1);
+      verifyBuildCallCount("/apis/qa-collision.ten1010.io/v2", 1);
+    }
+
+    // (b) API 서버에도 없는 그룹 → miss + 그룹 negative cache. TTL 내 동일 그룹 재조회 없음.
+    @Test
+    void missingGroup_negativeCached_noRepeatedApiCalls() throws Exception {
+      mockApiCallNotFound("/apis/ghost.example.io");
+
+      assertThat(discovery.isExist("ghost.example.io/things")).isFalse();
+      // TTL 내 동일 그룹의 어떤 리소스든 API 호출 없이 즉시 miss
+      assertThat(discovery.isExist("ghost.example.io/things")).isFalse();
+      assertThat(discovery.isExist("ghost.example.io/others")).isFalse();
+      assertThatThrownBy(() -> discovery.isNamespaced("ghost.example.io/things"))
+          .isInstanceOf(GroupResourceNotFoundException.class);
+
+      verifyBuildCallCount("/apis/ghost.example.io", 1);
+    }
+
+    // (c) 동일 그룹 동시 미스 → in-flight refresh 하나를 공유, API 호출 1회
+    @Test
+    void concurrentMisses_shareSingleInFlightRefresh() throws Exception {
+      CountDownLatch releaseLatch = new CountDownLatch(1);
+      Call groupCall = mock(Call.class);
+      when(groupCall.execute()).thenAnswer(invocation -> {
+        // 두 스레드 모두 in-flight future 대기에 진입할 때까지 응답을 지연
+        releaseLatch.await(5, TimeUnit.SECONDS);
+        return buildJsonResponse("/apis/newgroup.example.io", 200, """
+            {
+              "kind": "APIGroup",
+              "name": "newgroup.example.io",
+              "versions": [{"groupVersion": "newgroup.example.io/v1", "version": "v1"}]
+            }
+            """);
+      });
+      when(mockApiClient.buildCall(
+          any(), eq("/apis/newgroup.example.io"), any(), any(), any(), any(), any(), any(), any(),
+          any(), any()))
+          .thenReturn(groupCall);
+      mockApiCallRepeatable("/apis/newgroup.example.io/v1", """
+          {
+            "resources": [
+              {"name": "newthings", "kind": "NewThing", "namespaced": true}
+            ]
+          }
+          """);
+
+      ExecutorService pool = Executors.newFixedThreadPool(2);
+      try {
+        CountDownLatch started = new CountDownLatch(2);
+        List<Future<Boolean>> results = new ArrayList<>();
+        for (int i = 0; i < 2; i++) {
+          results.add(pool.submit(() -> {
+            started.countDown();
+            return discovery.isExist("newgroup.example.io/newthings");
+          }));
+        }
+        assertThat(started.await(2, TimeUnit.SECONDS)).isTrue();
+        Thread.sleep(300);
+        releaseLatch.countDown();
+
+        assertThat(results.get(0).get(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(results.get(1).get(5, TimeUnit.SECONDS)).isTrue();
+      } finally {
+        pool.shutdownNow();
+      }
+
+      verifyBuildCallCount("/apis/newgroup.example.io", 1);
+      verifyBuildCallCount("/apis/newgroup.example.io/v1", 1);
+    }
+
+    // (d) 기존 히트 경로는 API 호출 없음
+    @Test
+    void hitPath_makesNoApiCalls() {
+      clearInvocations(mockApiClient);
+
+      assertThat(discovery.isExist("apps/deployments")).isTrue();
+      assertThat(discovery.isNamespaced("apps/deployments")).isTrue();
+      assertThat(discovery.isExist("/pods")).isTrue();
+      assertThat(discovery.isNamespaced("/nodes")).isFalse();
+
+      verifyNoBuildCall();
+    }
+
+    // 코어 그룹("", "core" alias)과 형식 오류의 미스는 targeted refresh 대상이 아님 — 기존 동작 유지
+    @Test
+    void coreOrMalformedMiss_doesNotTriggerTargetedRefresh() {
+      clearInvocations(mockApiClient);
+
+      assertThat(discovery.isExist("/ghosts")).isFalse();
+      assertThat(discovery.isExist("core/ghosts")).isFalse();
+      assertThat(discovery.isExist("noslash")).isFalse();
+      assertThatThrownBy(() -> discovery.isNamespaced("/ghosts"))
+          .isInstanceOf(GroupResourceNotFoundException.class);
+
+      verifyNoBuildCall();
+    }
+
+    // 그룹은 존재하지만 요청 리소스가 없음 → miss + 리소스 단위 negative cache.
+    // TTL 내 동일 groupResource 반복 미스가 그룹 재조회를 유발하지 않음.
+    @Test
+    void existingGroup_missingResource_negativeCachedPerResource() throws Exception {
+      mockApiCallRepeatable("/apis/qa.example.io", """
+          {
+            "kind": "APIGroup",
+            "name": "qa.example.io",
+            "versions": [{"groupVersion": "qa.example.io/v1", "version": "v1"}]
+          }
+          """);
+      mockApiCallRepeatable("/apis/qa.example.io/v1", """
+          {
+            "resources": [
+              {"name": "widgets", "kind": "Widget", "namespaced": true}
+            ]
+          }
+          """);
+
+      assertThat(discovery.isExist("qa.example.io/gadgets")).isFalse();
+      assertThat(discovery.isExist("qa.example.io/gadgets")).isFalse();
+      // targeted refresh로 병합된 같은 그룹의 실제 리소스는 히트
+      assertThat(discovery.isExist("qa.example.io/widgets")).isTrue();
+
+      verifyBuildCallCount("/apis/qa.example.io", 1);
+      verifyBuildCallCount("/apis/qa.example.io/v1", 1);
+    }
+
+    private void mockApiCallRepeatable(String path, String responseBody) throws Exception {
+      Call call = mock(Call.class);
+      // Response body는 1회성이므로 호출마다 새 Response 생성
+      when(call.execute()).thenAnswer(invocation -> buildJsonResponse(path, 200, responseBody));
+      when(mockApiClient.buildCall(
+          any(), eq(path), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+          .thenReturn(call);
+    }
+
+    private void mockApiCallNotFound(String path) throws Exception {
+      Call call = mock(Call.class);
+      when(call.execute()).thenAnswer(invocation -> buildJsonResponse(path, 404, """
+          {"kind": "Status", "status": "Failure", "reason": "NotFound", "code": 404}
+          """));
+      when(mockApiClient.buildCall(
+          any(), eq(path), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+          .thenReturn(call);
+    }
+
+    private Response buildJsonResponse(String path, int code, String body) {
+      return new Response.Builder()
+          .request(new Request.Builder().url("https://localhost:6443" + path).build())
+          .protocol(Protocol.HTTP_1_1)
+          .code(code)
+          .message(code == 200 ? "OK" : "Not Found")
+          .body(ResponseBody.create(body, MediaType.get("application/json")))
+          .build();
+    }
+
+    private void verifyBuildCallCount(String path, int expectedCount) throws Exception {
+      verify(mockApiClient, times(expectedCount)).buildCall(
+          any(), eq(path), any(), any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    private void verifyNoBuildCall() {
+      try {
+        verify(mockApiClient, never()).buildCall(
+            any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+      } catch (Exception e) {
+        throw new AssertionError(e);
+      }
     }
   }
 }

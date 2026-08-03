@@ -11,6 +11,13 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.Call;
 import okhttp3.Response;
@@ -19,9 +26,30 @@ import org.jspecify.annotations.Nullable;
 @Slf4j
 public class ApiResourceDiscovery {
 
+  /** miss로 확인된 그룹/리소스를 짧게 기억하여 반복 라이브 조회를 막는 negative cache TTL. */
+  private static final long NEGATIVE_CACHE_TTL_NANOS = TimeUnit.SECONDS.toNanos(15);
+  /**
+   * 미스 1건당 targeted refresh 대기 상한. 초과 시 기존 스냅샷 기준으로 판정한다.
+   * 한 웹훅 요청 안에서 서로 다른 그룹 미스가 순차 발생해도 누적 대기가 웹훅
+   * timeoutSeconds(10초, failurePolicy: Fail) 예산을 넘지 않도록 짧게 유지한다.
+   * 인클러스터 디스커버리 GET 수 회는 정상적으로 수백 ms 내에 끝난다.
+   */
+  private static final long PER_MISS_REFRESH_WAIT_TIMEOUT_MS = 2_000;
+
   private final ApiClient apiClient;
   private final ObjectMapper mapper;
   private volatile Snapshot snapshot;
+  /** 스냅샷 참조 교체(전체 refresh 커밋, targeted 병합)를 직렬화하는 락. 읽기는 락 없이 volatile로. */
+  private final Object snapshotWriteLock = new Object();
+  /** 그룹별 진행 중인 targeted refresh. 동일 그룹 동시 미스는 하나의 refresh를 공유한다. */
+  private final ConcurrentHashMap<String, CompletableFuture<Boolean>> inFlightGroupRefreshes =
+      new ConcurrentHashMap<>();
+  /** API 서버에도 존재하지 않는 그룹의 negative cache. 값은 만료 시각(nanoTime 기준). */
+  private final ConcurrentHashMap<String, Long> negativeGroupCache = new ConcurrentHashMap<>();
+  /** 그룹은 존재하지만 리소스가 없는 groupResource의 negative cache. 값은 만료 시각(nanoTime 기준). */
+  private final ConcurrentHashMap<String, Long> negativeGroupResourceCache =
+      new ConcurrentHashMap<>();
+  private final ExecutorService targetedRefreshExecutor = createTargetedRefreshExecutor();
 
   public ApiResourceDiscovery(ApiClient apiClient) {
     this.apiClient = apiClient;
@@ -31,11 +59,24 @@ public class ApiResourceDiscovery {
     updateConfigMap(this.snapshot);
   }
 
+  private static ExecutorService createTargetedRefreshExecutor() {
+    return Executors.newCachedThreadPool(runnable -> {
+      Thread thread = new Thread(runnable, "api-resource-discovery-targeted-refresh");
+      thread.setDaemon(true);
+      return thread;
+    });
+  }
+
   public void refresh() {
     log.info("Refreshing API resource discovery");
     long startNanos = System.nanoTime();
     Snapshot newSnapshot = buildSnapshot();
-    this.snapshot = newSnapshot;
+    synchronized (this.snapshotWriteLock) {
+      this.snapshot = newSnapshot;
+    }
+    // 전체 refresh가 최신 진실이므로 negative cache를 비워 즉시 재판정 가능하게 한다.
+    this.negativeGroupCache.clear();
+    this.negativeGroupResourceCache.clear();
     updateConfigMap(newSnapshot);
     long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
     log.info("API resource discovery refresh complete: plurals={}, namespacedInfo={}, kinds={}, "
@@ -231,13 +272,200 @@ public class ApiResourceDiscovery {
   public boolean isNamespaced(String groupResource) {
     Boolean result = this.snapshot.namespacedInfo().get(groupResource);
     if (result == null) {
+      refreshOnMiss(groupResource);
+      result = this.snapshot.namespacedInfo().get(groupResource);
+    }
+    if (result == null) {
       throw new GroupResourceNotFoundException(groupResource);
     }
     return result;
   }
 
   public boolean isExist(String groupResource) {
+    if (this.snapshot.groupResources().contains(groupResource)) {
+      return true;
+    }
+    refreshOnMiss(groupResource);
     return this.snapshot.groupResources().contains(groupResource);
+  }
+
+  /**
+   * 스냅샷 미스 시 해당 그룹만 라이브로 targeted refresh 한다.
+   * CRD 생성 직후 주기적 전체 refresh(5분) 전에 들어온 웹훅 요청이 캐시 미스로 거부되는 문제를 해결.
+   *
+   * <p>동일 그룹에 대한 동시 미스는 in-flight 맵으로 하나의 refresh를 공유하고,
+   * miss로 확인된 그룹/리소스는 짧은 TTL의 negative cache로 반복 라이브 조회를 막는다.
+   * 대기 타임아웃/실패 시에는 기존 스냅샷 기준으로 판정한다(호출부 재조회가 miss 처리).
+   */
+  private void refreshOnMiss(String groupResource) {
+    String group = extractTargetedRefreshGroup(groupResource);
+    if (group == null) {
+      // 코어 리소스("" 또는 "core" alias)와 형식 오류는 targeted refresh 대상이 아님. 기존 동작 유지.
+      return;
+    }
+    if (isNegativeCached(this.negativeGroupCache, group)
+        || isNegativeCached(this.negativeGroupResourceCache, groupResource)) {
+      return;
+    }
+    CompletableFuture<Boolean> refreshFuture = this.inFlightGroupRefreshes.computeIfAbsent(group,
+        g -> CompletableFuture
+            .supplyAsync(() -> refreshGroup(g), this.targetedRefreshExecutor)
+            .whenComplete((found, throwable) -> this.inFlightGroupRefreshes.remove(g)));
+    try {
+      boolean groupFound = refreshFuture.get(PER_MISS_REFRESH_WAIT_TIMEOUT_MS,
+          TimeUnit.MILLISECONDS);
+      if (groupFound && !this.snapshot.groupResources().contains(groupResource)) {
+        // 그룹은 방금 갱신됐지만 요청된 리소스가 없음 → 리소스 단위 negative cache로 반복 재조회 차단.
+        this.negativeGroupResourceCache.put(groupResource,
+            System.nanoTime() + NEGATIVE_CACHE_TTL_NANOS);
+        log.info("Group refreshed but resource not found, negative-cached: groupResource={}, "
+                + "ttlMs={}",
+            groupResource, TimeUnit.NANOSECONDS.toMillis(NEGATIVE_CACHE_TTL_NANOS));
+      }
+    } catch (TimeoutException e) {
+      log.warn("Targeted API discovery refresh wait timed out, judging by current snapshot: "
+              + "group={}, timeoutMs={}", group, PER_MISS_REFRESH_WAIT_TIMEOUT_MS);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      log.warn("Interrupted while waiting for targeted API discovery refresh: group={}", group);
+    } catch (ExecutionException e) {
+      log.error("Targeted API discovery refresh failed: group={}", group, e.getCause());
+    }
+  }
+
+  /**
+   * targeted refresh 대상 그룹을 추출한다.
+   * 코어 리소스(빈 그룹 "/pods" 형태), "core" alias, 구분자 없는 형식 오류는 null 반환.
+   */
+  @Nullable
+  private String extractTargetedRefreshGroup(String groupResource) {
+    int separatorIndex = groupResource.indexOf('/');
+    if (separatorIndex <= 0) {
+      return null;
+    }
+    String group = groupResource.substring(0, separatorIndex);
+    if ("core".equals(group)) {
+      return null;
+    }
+    return group;
+  }
+
+  private boolean isNegativeCached(ConcurrentHashMap<String, Long> cache, String key) {
+    Long deadlineNanos = cache.get(key);
+    if (deadlineNanos == null) {
+      return false;
+    }
+    if (System.nanoTime() - deadlineNanos < 0) {
+      return true;
+    }
+    cache.remove(key, deadlineNanos);
+    return false;
+  }
+
+  /**
+   * 단일 그룹의 버전/리소스를 라이브 조회하여 스냅샷에 병합한다.
+   * targetedRefreshExecutor 스레드에서 실행되며, 웹훅 대기자들은 이 결과를 공유한다.
+   *
+   * @return 그룹이 API 서버에 존재하고 리소스가 하나 이상 병합되었으면 true
+   */
+  private boolean refreshGroup(String group) {
+    log.info("Refreshing API resource discovery for missed group: group={}", group);
+    JsonNode groupNode = fetchJson("/apis/" + group);
+    if (groupNode == null) {
+      markGroupMissing(group);
+      return false;
+    }
+    List<String> groupVersionNames = new ArrayList<>();
+    for (JsonNode version : groupNode.path("versions")) {
+      String groupVersion = version.path("groupVersion").textValue();
+      if (groupVersion != null) {
+        groupVersionNames.add(groupVersion);
+      }
+    }
+
+    Map<String, String> plurals = new HashMap<>();
+    Map<String, Boolean> namespacedInfo = new HashMap<>();
+    Map<String, String> groupVersions = new HashMap<>();
+    Map<String, List<String>> kindEntries = new HashMap<>();
+    Set<String> groupResources = new HashSet<>();
+    for (String groupVersion : groupVersionNames) {
+      JsonNode resources = fetchJson("/apis/" + groupVersion);
+      if (resources == null) {
+        log.error("Targeted API group/version discovery failed: groupVersion={}", groupVersion);
+        continue;
+      }
+      for (JsonNode resource : resources.path("resources")) {
+        String name = resource.path("name").textValue();
+        if (name == null || name.contains("/")) {
+          continue;
+        }
+        String kind = resource.path("kind").textValue();
+        boolean namespaced = resource.path("namespaced").booleanValue();
+
+        String groupResource = group + "/" + name;
+        plurals.put(groupVersion + "/" + kind, name);
+        namespacedInfo.put(groupResource, namespaced);
+        groupVersions.put(groupResource, groupVersion);
+        groupResources.add(groupResource);
+        kindEntries.computeIfAbsent(kind, k -> new ArrayList<>()).add(groupResource);
+      }
+    }
+    if (groupResources.isEmpty()) {
+      markGroupMissing(group);
+      return false;
+    }
+    mergeSnapshot(plurals, namespacedInfo, groupVersions, kindEntries, groupResources);
+    log.info("Targeted API discovery refresh complete: group={}, groupVersions={}, resources={}",
+        group, groupVersionNames.size(), groupResources.size());
+    return true;
+  }
+
+  private void markGroupMissing(String group) {
+    this.negativeGroupCache.put(group, System.nanoTime() + NEGATIVE_CACHE_TTL_NANOS);
+    log.info("Group not found on API server, negative-cached: group={}, ttlMs={}",
+        group, TimeUnit.NANOSECONDS.toMillis(NEGATIVE_CACHE_TTL_NANOS));
+  }
+
+  /**
+   * targeted refresh 결과를 스냅샷에 병합한다.
+   * 기존 스냅샷의 맵을 변경하지 않고 복사 + 병합한 새 Snapshot으로 참조를 교체한다.
+   * snapshotWriteLock으로 전체 refresh 커밋 및 다른 그룹의 targeted 병합과 직렬화하여
+   * lost-update를 막는다.
+   */
+  private void mergeSnapshot(
+      Map<String, String> newPlurals,
+      Map<String, Boolean> newNamespacedInfo,
+      Map<String, String> newGroupVersions,
+      Map<String, List<String>> newKindEntries,
+      Set<String> newGroupResources) {
+    synchronized (this.snapshotWriteLock) {
+      Snapshot current = this.snapshot;
+      Map<String, String> plurals = new HashMap<>(current.plurals());
+      plurals.putAll(newPlurals);
+      Map<String, Boolean> namespacedInfo = new HashMap<>(current.namespacedInfo());
+      namespacedInfo.putAll(newNamespacedInfo);
+      Map<String, String> groupVersions = new HashMap<>(current.groupVersions());
+      groupVersions.putAll(newGroupVersions);
+      Set<String> groupResources = new HashSet<>(current.groupResources());
+      groupResources.addAll(newGroupResources);
+      Map<String, List<String>> kindDict = new HashMap<>(current.kindDict());
+      for (Map.Entry<String, List<String>> entry : newKindEntries.entrySet()) {
+        List<String> merged = new ArrayList<>(kindDict.getOrDefault(entry.getKey(), List.of()));
+        for (String groupResource : entry.getValue()) {
+          if (!merged.contains(groupResource)) {
+            merged.add(groupResource);
+          }
+        }
+        kindDict.put(entry.getKey(), merged);
+      }
+      this.snapshot = new Snapshot(plurals, namespacedInfo, groupVersions, kindDict,
+          groupResources);
+    }
+  }
+
+  /** Spring @Bean inferred destroy method — 컨텍스트 종료 시 targeted refresh executor 정리. */
+  public void shutdown() {
+    this.targetedRefreshExecutor.shutdownNow();
   }
 
   @Nullable
