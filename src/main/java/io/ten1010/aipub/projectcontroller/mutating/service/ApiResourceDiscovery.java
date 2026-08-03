@@ -49,19 +49,22 @@ public class ApiResourceDiscovery {
   /** 그룹은 존재하지만 리소스가 없는 groupResource의 negative cache. 값은 만료 시각(nanoTime 기준). */
   private final ConcurrentHashMap<String, Long> negativeGroupResourceCache =
       new ConcurrentHashMap<>();
-  private final ExecutorService targetedRefreshExecutor;
+  private final ExecutorService targetedRefreshExecutor = createTargetedRefreshExecutor();
 
   public ApiResourceDiscovery(ApiClient apiClient) {
     this.apiClient = apiClient;
     this.mapper = new ObjectMapperFactory().createObjectMapper();
-    this.targetedRefreshExecutor = Executors.newCachedThreadPool(runnable -> {
+    log.info("Initializing API resource discovery");
+    this.snapshot = buildSnapshot();
+    updateConfigMap(this.snapshot);
+  }
+
+  private static ExecutorService createTargetedRefreshExecutor() {
+    return Executors.newCachedThreadPool(runnable -> {
       Thread thread = new Thread(runnable, "api-resource-discovery-targeted-refresh");
       thread.setDaemon(true);
       return thread;
     });
-    log.info("Initializing API resource discovery");
-    this.snapshot = buildSnapshot();
-    updateConfigMap(this.snapshot);
   }
 
   public void refresh() {
