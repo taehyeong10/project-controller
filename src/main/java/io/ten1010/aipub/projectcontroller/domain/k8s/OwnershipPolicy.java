@@ -10,11 +10,11 @@ import java.util.List;
 public final class OwnershipPolicy {
 
   /**
-   * 소유 오브젝트에 개인 Role 로 부여하는 verbs.
-   * update/patch/delete 에 더해 get 을 포함하는 이유: 멤버 공통 Role 이 조회를 주지 않는
-   * 타입이 목록에 들어올 수 있고, 중복 get 은 무해하기 때문이다.
+   * 소유 오브젝트에 개인 Role 로 부여하는 verbs. 기존 워크로드 경로(UPDATABLE_VERBS)와
+   * 동일하다: 조회(create/get/watch/list)는 멤버 공통 Role 이 OWNED_TARGETS 전 타입에
+   * 네임스페이스 단위로 이미 부여하므로, 개인 Role 은 쓰기 계열만 소유 오브젝트로 제한한다.
    */
-  public static final List<String> OWNED_VERBS = List.of("get", "update", "patch", "delete");
+  public static final List<String> OWNED_VERBS = List.of("update", "patch", "delete");
 
   /**
    * 시스템 파생물 표식 레이블. 이 레이블이 붙은 오브젝트는 소유자 레이블이 있어도
