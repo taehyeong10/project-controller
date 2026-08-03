@@ -63,7 +63,8 @@ class ReconciliationServiceOwnedRulesTest {
     assertThat(rule.getApiGroups()).containsExactly("");
     assertThat(rule.getResources()).containsExactly("configmaps");
     assertThat(rule.getResourceNames()).containsExactly("my-config");
-    assertThat(rule.getVerbs()).isEqualTo(OwnershipPolicy.OWNED_VERBS);
+    // 기존 워크로드 경로(buildUpdateDeleteRoleRule)와 동일한 verbs
+    assertThat(rule.getVerbs()).containsExactly("update", "patch", "delete");
   }
 
   @Test
