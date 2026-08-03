@@ -188,6 +188,19 @@ public class OwnedObjectInformerManager {
   }
 
   /**
+   * 소유권 추적용 레이블 셀렉터: username 레이블이 있고, 시스템 파생물 표식
+   * (OwnershipPolicy.SYSTEM_DERIVED_LABEL_KEYS)이 없는 오브젝트만.
+   * 서버사이드 필터라 파생물은 캐시·이벤트·로그 어디에도 나타나지 않는다.
+   */
+  static String ownedObjectsLabelSelector() {
+    StringBuilder selector = new StringBuilder(LabelConstants.OBJECT_OWN_USERNAME_KEY);
+    for (String key : OwnershipPolicy.SYSTEM_DERIVED_LABEL_KEYS) {
+      selector.append(",!").append(key);
+    }
+    return selector.toString();
+  }
+
+  /**
    * core("") 그룹은 /api/v1, 나머지는 /apis/{group}/{version} 의 전체 네임스페이스
    * LIST/WATCH 경로를 사용한다. username 레이블이 있는 오브젝트만 list/watch 한다.
    */
@@ -198,7 +211,7 @@ public class OwnedObjectInformerManager {
     String path = basePath + "/" + target.plural();
 
     List<Pair> queryParams = new ArrayList<>();
-    queryParams.add(new Pair("labelSelector", LabelConstants.OBJECT_OWN_USERNAME_KEY));
+    queryParams.add(new Pair("labelSelector", ownedObjectsLabelSelector()));
     if (params.resourceVersion != null) {
       queryParams.add(new Pair("resourceVersion", params.resourceVersion));
     }

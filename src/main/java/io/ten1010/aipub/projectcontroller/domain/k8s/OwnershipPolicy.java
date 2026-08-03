@@ -17,6 +17,17 @@ public final class OwnershipPolicy {
   public static final List<String> OWNED_VERBS = List.of("get", "update", "patch", "delete");
 
   /**
+   * 시스템 파생물 표식 레이블. 이 레이블이 붙은 오브젝트는 소유자 레이블이 있어도
+   * 소유권 추적에서 제외한다. 예: K8s endpoints 컨트롤러는 Service 의 레이블 전체를
+   * 자신이 만드는 Endpoints 에 복사하므로, 사용자 Service 에서 파생된 시스템 Endpoints 가
+   * username 레이블을 상속받는다 — 이런 파생물에 소유권 규칙을 만들 이유가 없다.
+   * 사용자가 직접 만든 오브젝트(예: selectorless Endpoints)에는 이 표식이 없으므로
+   * 소유권이 정상 부여된다.
+   */
+  public static final List<String> SYSTEM_DERIVED_LABEL_KEYS = List.of(
+      "endpoints.kubernetes.io/managed-by");
+
+  /**
    * 소유권 추적 대상 네이티브 네임스페이스 리소스 16종 (고정 목록).
    * 소유자 레이블(aipub.ten1010.io/username)이 있는 오브젝트만 추적되며,
    * 레이블은 낙인 웹훅(mutating-webhook-user-v2.yaml 의 rules)이 16종 전부의 CREATE 를
