@@ -50,8 +50,11 @@ public class UserLabelReviewHandler implements ReviewHandler {
     Objects.requireNonNull(review.getRequest());
 
     V1AdmissionReviewRequest request = review.getRequest();
-    // 클러스터 스코프 CR 생성에도 소유자 레이블을 낙인해야 하므로 네임스페이스를 요구하지 않는다
-    return OPERATION_CREATE.equals(request.getOperation());
+    if (!OPERATION_CREATE.equals(request.getOperation())) {
+      return false;
+    }
+    // 소유권 대상(OwnershipPolicy.OWNED_TARGETS)은 전부 네임스페이스 리소스다
+    return request.getNamespace() != null && !request.getNamespace().isEmpty();
   }
 
   @Override
@@ -61,6 +64,7 @@ public class UserLabelReviewHandler implements ReviewHandler {
     V1AdmissionReviewRequest request = review.getRequest();
     Objects.requireNonNull(request.getUserInfo());
     Objects.requireNonNull(request.getObject());
+    Objects.requireNonNull(request.getNamespace());
 
     log.debug("UserLabel handle: user={}, namespace={}, operation={}",
         request.getUserInfo().getUsername(), request.getNamespace(), request.getOperation());
@@ -94,12 +98,6 @@ public class UserLabelReviewHandler implements ReviewHandler {
           "Not found aipub user: " + analysis.getUsername());
       return;
     } else {
-      if (request.getNamespace() == null || request.getNamespace().isEmpty()) {
-        // 오너 레이블 전파는 네임스페이스 오브젝트에만 적용된다
-        log.debug("UserLabel: cluster-scoped object from non aipub member, allowing without mutation");
-        V1AdmissionReviewUtils.allowMerging(review);
-        return;
-      }
       log.debug("UserLabel: not aipub member, looking up owner labels");
       String[] ownerLabels;
       try {

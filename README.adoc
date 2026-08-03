@@ -198,17 +198,14 @@ Project Controller는 리소스가 만들어지거나 바뀌는 시점에 admiss
 
 === 소유권 이벤트 로그 조회
 
-컨트롤러는 CRD 감지와 소유 오브젝트(CR·네이티브 리소스) 변화를 INFO 레벨로 기록합니다.
+컨트롤러는 소유권 대상 리소스(OwnershipPolicy.OWNED_TARGETS 의 네이티브 16종)의
+소유 오브젝트 변화를 INFO 레벨로 기록합니다.
 
-* `Detected CRD` / `Removed CRD` — CRD 등록·삭제 감지
-* `Started owned-object informer` / `Stopped owned-object informer` — 타입별 추적 시작·중지
+* `Started owned-object informers` — 기동 시 소유권 추적 시작
 * `Owned object created` / `Owned object ownership changed` / `Owned object deleted` — 소유 오브젝트 생성·소유권 변경·삭제
 
 [source,bash]
 ----
-# CRD 감지/제거 로그
-kubectl logs -n project-controller deploy/project-controller | grep -E "Detected CRD|Removed CRD"
-
 # 소유 오브젝트 생성/변경/삭제 로그
 kubectl logs -n project-controller deploy/project-controller | grep "Owned object"
 
@@ -217,7 +214,7 @@ kubectl logs -n project-controller deploy/project-controller | grep "Owned objec
 
 # 실시간 스트리밍
 kubectl logs -n project-controller deploy/project-controller -f --tail=200 \
-  | grep --line-buffered -E "Detected CRD|Removed CRD|Owned object|owned-object informer"
+  | grep --line-buffered "Owned object"
 ----
 
 참고: 컨트롤러가 재기동하면 초기 동기화 과정에서 기존 소유 오브젝트 전체가 `Owned object created` 로 한 번씩 다시 출력됩니다(재기동 시점의 인벤토리이며, 오브젝트가 실제로 새로 생성된 것은 아닙니다).

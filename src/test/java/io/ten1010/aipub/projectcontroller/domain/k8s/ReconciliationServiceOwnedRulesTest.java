@@ -12,7 +12,7 @@ import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-class ReconciliationServiceOwnedCrRulesTest {
+class ReconciliationServiceOwnedRulesTest {
 
   private ReconciliationService reconciliationService;
   private V1alpha1AipubUser user;
@@ -53,21 +53,21 @@ class ReconciliationServiceOwnedCrRulesTest {
   }
 
   @Test
-  void reconcileAipubUserRoleRules_withOwnedCrObjects_appendsOwnedCrRules() {
+  void reconcileAipubUserRoleRules_withOwnedObjects_appendsOwnedRules() {
     List<V1PolicyRule> rules = this.reconciliationService.reconcileAipubUserRoleRules(
         this.user, this.project, List.of(),
-        List.of(new OwnedCrObject("example.com", "widgets", "my-widget")));
+        List.of(new OwnedObject("", "configmaps", "my-config")));
 
     assertThat(rules).hasSize(1);
     V1PolicyRule rule = rules.get(0);
-    assertThat(rule.getApiGroups()).containsExactly("example.com");
-    assertThat(rule.getResources()).containsExactly("widgets");
-    assertThat(rule.getResourceNames()).containsExactly("my-widget");
-    assertThat(rule.getVerbs()).containsExactly("get", "update", "patch", "delete");
+    assertThat(rule.getApiGroups()).containsExactly("");
+    assertThat(rule.getResources()).containsExactly("configmaps");
+    assertThat(rule.getResourceNames()).containsExactly("my-config");
+    assertThat(rule.getVerbs()).isEqualTo(OwnershipPolicy.OWNED_VERBS);
   }
 
   @Test
-  void reconcileAipubUserRoleRules_withoutOwnedCrObjects_returnsSameAsLegacyOverload() {
+  void reconcileAipubUserRoleRules_withoutOwnedObjects_returnsSameAsLegacyOverload() {
     List<V1PolicyRule> legacy = this.reconciliationService.reconcileAipubUserRoleRules(
         this.user, this.project, List.of());
     List<V1PolicyRule> rules = this.reconciliationService.reconcileAipubUserRoleRules(
@@ -77,19 +77,15 @@ class ReconciliationServiceOwnedCrRulesTest {
   }
 
   @Test
-  void reconcileClusterRoleRules_withOwnedCrObjects_appendsOwnedCrRules() {
-    List<V1PolicyRule> baseRules = this.reconciliationService.reconcileClusterRoleRules(this.user);
-    List<V1PolicyRule> rules = this.reconciliationService.reconcileClusterRoleRules(
-        this.user,
-        List.of(new OwnedCrObject("example.com", "clusterwidgets", "my-cluster-widget")));
-
-    assertThat(rules).hasSize(baseRules.size() + 1);
-    assertThat(rules.subList(0, baseRules.size())).isEqualTo(baseRules);
-    V1PolicyRule appended = rules.get(rules.size() - 1);
-    assertThat(appended.getApiGroups()).containsExactly("example.com");
-    assertThat(appended.getResources()).containsExactly("clusterwidgets");
-    assertThat(appended.getResourceNames()).containsExactly("my-cluster-widget");
-    assertThat(appended.getVerbs()).containsExactly("get", "update", "patch", "delete");
+  void ownershipPolicy_targetsMatchUserFacingSixteen() {
+    assertThat(OwnershipPolicy.OWNED_TARGETS).hasSize(16);
+    assertThat(OwnershipPolicy.OWNED_TARGETS)
+        .extracting(ResourceTarget::plural)
+        .containsExactlyInAnyOrder(
+            "pods", "configmaps", "secrets", "services", "endpoints", "serviceaccounts",
+            "events", "persistentvolumeclaims", "limitranges",
+            "deployments", "replicasets", "statefulsets", "daemonsets",
+            "horizontalpodautoscalers", "poddisruptionbudgets", "ingresses");
   }
 
 }

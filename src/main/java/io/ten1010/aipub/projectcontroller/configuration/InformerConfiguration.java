@@ -4,8 +4,8 @@ import io.kubernetes.client.informer.SharedInformerFactory;
 import io.ten1010.aipub.projectcontroller.domain.k8s.K8sApiProvider;
 import io.ten1010.aipub.projectcontroller.informer.InformerRegistrar;
 import io.ten1010.aipub.projectcontroller.informer.SharedInformerFactoryProvider;
-import io.ten1010.aipub.projectcontroller.informer.dynamic.DynamicCrInformerManager;
-import io.ten1010.aipub.projectcontroller.informer.dynamic.OwnedObjectRoleResweeper;
+import io.ten1010.aipub.projectcontroller.informer.owned.OwnedObjectInformerManager;
+import io.ten1010.aipub.projectcontroller.informer.owned.OwnedObjectRoleResweeper;
 import java.util.List;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -21,15 +21,15 @@ public class InformerConfiguration {
   }
 
   @Bean
-  public DynamicCrInformerManager dynamicCrInformerManager(
+  public OwnedObjectInformerManager ownedObjectInformerManager(
       K8sApiProvider k8sApiProvider, SharedInformerFactory sharedInformerFactory) {
-    return new DynamicCrInformerManager(k8sApiProvider.getApiClient(), sharedInformerFactory);
+    return new OwnedObjectInformerManager(k8sApiProvider.getApiClient(), sharedInformerFactory);
   }
 
   @Bean
   public OwnedObjectRoleResweeper ownedObjectRoleResweeper(
-      DynamicCrInformerManager dynamicCrInformerManager) {
-    return new OwnedObjectRoleResweeper(dynamicCrInformerManager);
+      OwnedObjectInformerManager ownedObjectInformerManager) {
+    return new OwnedObjectRoleResweeper(ownedObjectInformerManager);
   }
 
 }

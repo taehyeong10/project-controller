@@ -36,9 +36,10 @@ webhooks:
             - aipub-efk
     objectSelector: { }
     reinvocationPolicy: IfNeeded
-    # rules 는 부트스트랩 값이다. 기동 후에는 user-label-webhook-configuration-controller 가
-    # CRD 목록에 맞춰 rules 를 리컨실한다(CRD 그룹마다 scope "*" CREATE rule 추가).
-    # base rules 를 바꿀 때는 UserLabelWebhookConfigurationReconciler.baseRules() 도 함께 수정할 것.
+    # 소유권 대상 타입(OwnershipPolicy.OWNED_TARGETS)의 CREATE 를 인터셉트해 소유자 레이블을 찍는다.
+    # events/endpoints 는 시스템 컴포넌트가 고빈도로 생성하므로 인터셉트하지 않는다
+    # (레이블이 없는 오브젝트는 소유권 추적 대상이 아님).
+    # OwnershipPolicy 목록을 바꿀 때는 이 rules 도 함께 확인할 것.
     rules:
       - apiGroups: [ "" ]
         apiVersions: [ "*" ]
