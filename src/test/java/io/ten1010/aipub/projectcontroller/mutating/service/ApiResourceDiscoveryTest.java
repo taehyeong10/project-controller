@@ -311,32 +311,33 @@ class ApiResourceDiscoveryTest {
   @Nested
   class RefreshOnMiss {
 
-    // (a) 스냅샷 미스 → 해당 그룹만 targeted refresh → 히트.
+    // (a) 스냅샷 미스 → 해당 리소스의 CRD만 이름(<plural>.<group>)으로 단건 조회 → 히트.
     // CRD 생성 직후 5분 주기 전체 refresh 전에 들어온 웹훅 요청이 400 거부되던 문제의 재현/수정 검증.
     @Test
-    void missedGroup_targetedRefresh_thenHit() throws Exception {
-      mockApiCallRepeatable("/apis/qa-collision.ten1010.io", """
+    void missedResource_crdLookup_thenHit() throws Exception {
+      String crdPath = "/apis/apiextensions.k8s.io/v1/customresourcedefinitions/"
+          + "qamultiversions.qa-collision.ten1010.io";
+      mockApiCallRepeatable(crdPath, """
           {
-            "kind": "APIGroup",
-            "name": "qa-collision.ten1010.io",
-            "versions": [
-              {"groupVersion": "qa-collision.ten1010.io/v1", "version": "v1"},
-              {"groupVersion": "qa-collision.ten1010.io/v2", "version": "v2"}
-            ]
-          }
-          """);
-      mockApiCallRepeatable("/apis/qa-collision.ten1010.io/v1", """
-          {
-            "resources": [
-              {"name": "qamultiversions", "kind": "QaMultiVersion", "namespaced": true}
-            ]
-          }
-          """);
-      mockApiCallRepeatable("/apis/qa-collision.ten1010.io/v2", """
-          {
-            "resources": [
-              {"name": "qamultiversions", "kind": "QaMultiVersion", "namespaced": true}
-            ]
+            "apiVersion": "apiextensions.k8s.io/v1",
+            "kind": "CustomResourceDefinition",
+            "metadata": {"name": "qamultiversions.qa-collision.ten1010.io"},
+            "spec": {
+              "group": "qa-collision.ten1010.io",
+              "names": {"plural": "qamultiversions", "kind": "QaMultiVersion"},
+              "scope": "Namespaced",
+              "versions": [
+                {"name": "v1", "served": true, "storage": false},
+                {"name": "v2", "served": true, "storage": true}
+              ]
+            },
+            "status": {
+              "acceptedNames": {"plural": "qamultiversions", "kind": "QaMultiVersion"},
+              "conditions": [
+                {"type": "NamesAccepted", "status": "True"},
+                {"type": "Established", "status": "True"}
+              ]
+            }
           }
           """);
 
@@ -344,59 +345,72 @@ class ApiResourceDiscoveryTest {
       assertThat(discovery.isNamespaced("qa-collision.ten1010.io/qamultiversions")).isTrue();
       assertThat(discovery.getGroupVersion("qa-collision.ten1010.io/qamultiversions"))
           .isEqualTo("qa-collision.ten1010.io/v2");
+      assertThat(discovery.getResourcesByKind("QaMultiVersion"))
+          .containsExactly(new ApiResourceDiscovery.ResourceInfo(
+              "qa-collision.ten1010.io/v2", "qamultiversions"));
       // 병합이 기존 스냅샷 항목을 덮어쓰지 않음
       assertThat(discovery.isExist("/pods")).isTrue();
       assertThat(discovery.isExist("apps/deployments")).isTrue();
       assertThat(discovery.getResourcesByKind("Deployment"))
           .containsExactly(new ApiResourceDiscovery.ResourceInfo("apps/v1", "deployments"));
-      // 첫 miss의 targeted refresh 이후에는 스냅샷 히트 → 그룹 재조회 없음
-      verifyBuildCallCount("/apis/qa-collision.ten1010.io", 1);
-      verifyBuildCallCount("/apis/qa-collision.ten1010.io/v1", 1);
-      verifyBuildCallCount("/apis/qa-collision.ten1010.io/v2", 1);
+      // 첫 miss의 CRD 단건 조회 이후에는 스냅샷 히트 → 재조회 없음. 그룹 디스커버리는 사용하지 않음.
+      verifyBuildCallCount(crdPath, 1);
+      verifyBuildCallCount("/apis/qa-collision.ten1010.io", 0);
+      verifyBuildCallCount("/apis/qa-collision.ten1010.io/v1", 0);
     }
 
-    // (b) API 서버에도 없는 그룹 → miss + 그룹 negative cache. TTL 내 동일 그룹 재조회 없음.
+    // (b) CRD가 존재하지 않는 조합 → miss + 조합 단위 negative cache. TTL 내 재조회 없음.
+    // RBAC 룰의 그룹×리소스 크로스곱처럼 없는 조합이 연달아 들어와도 조합당 단건 GET 1회가 전부.
     @Test
-    void missingGroup_negativeCached_noRepeatedApiCalls() throws Exception {
-      mockApiCallNotFound("/apis/ghost.example.io");
+    void missingCrd_negativeCached_noRepeatedApiCalls() throws Exception {
+      String thingsCrdPath = "/apis/apiextensions.k8s.io/v1/customresourcedefinitions/"
+          + "things.ghost.example.io";
+      String othersCrdPath = "/apis/apiextensions.k8s.io/v1/customresourcedefinitions/"
+          + "others.ghost.example.io";
+      mockApiCallNotFound(thingsCrdPath);
+      mockApiCallNotFound(othersCrdPath);
 
       assertThat(discovery.isExist("ghost.example.io/things")).isFalse();
-      // TTL 내 동일 그룹의 어떤 리소스든 API 호출 없이 즉시 miss
+      // TTL 내 동일 조합은 API 호출 없이 즉시 miss
       assertThat(discovery.isExist("ghost.example.io/things")).isFalse();
-      assertThat(discovery.isExist("ghost.example.io/others")).isFalse();
       assertThatThrownBy(() -> discovery.isNamespaced("ghost.example.io/things"))
           .isInstanceOf(GroupResourceNotFoundException.class);
+      // 다른 조합은 자기 CRD만 단건 조회. 그룹 디스커버리는 사용하지 않음.
+      assertThat(discovery.isExist("ghost.example.io/others")).isFalse();
 
-      verifyBuildCallCount("/apis/ghost.example.io", 1);
+      verifyBuildCallCount(thingsCrdPath, 1);
+      verifyBuildCallCount(othersCrdPath, 1);
+      verifyBuildCallCount("/apis/ghost.example.io", 0);
     }
 
-    // (c) 동일 그룹 동시 미스 → in-flight refresh 하나를 공유, API 호출 1회
+    // (c) 동일 조합 동시 미스 → in-flight 조회 하나를 공유, API 호출 1회
     @Test
-    void concurrentMisses_shareSingleInFlightRefresh() throws Exception {
+    void concurrentMisses_shareSingleInFlightLookup() throws Exception {
+      String crdPath = "/apis/apiextensions.k8s.io/v1/customresourcedefinitions/"
+          + "newthings.newgroup.example.io";
       CountDownLatch releaseLatch = new CountDownLatch(1);
-      Call groupCall = mock(Call.class);
-      when(groupCall.execute()).thenAnswer(invocation -> {
+      Call crdCall = mock(Call.class);
+      when(crdCall.execute()).thenAnswer(invocation -> {
         // 두 스레드 모두 in-flight future 대기에 진입할 때까지 응답을 지연
         releaseLatch.await(5, TimeUnit.SECONDS);
-        return buildJsonResponse("/apis/newgroup.example.io", 200, """
+        return buildJsonResponse(crdPath, 200, """
             {
-              "kind": "APIGroup",
-              "name": "newgroup.example.io",
-              "versions": [{"groupVersion": "newgroup.example.io/v1", "version": "v1"}]
+              "spec": {
+                "group": "newgroup.example.io",
+                "names": {"plural": "newthings", "kind": "NewThing"},
+                "scope": "Namespaced",
+                "versions": [{"name": "v1", "served": true, "storage": true}]
+              },
+              "status": {
+                "acceptedNames": {"plural": "newthings", "kind": "NewThing"},
+                "conditions": [{"type": "Established", "status": "True"}]
+              }
             }
             """);
       });
       when(mockApiClient.buildCall(
-          any(), eq("/apis/newgroup.example.io"), any(), any(), any(), any(), any(), any(), any(),
-          any(), any()))
-          .thenReturn(groupCall);
-      mockApiCallRepeatable("/apis/newgroup.example.io/v1", """
-          {
-            "resources": [
-              {"name": "newthings", "kind": "NewThing", "namespaced": true}
-            ]
-          }
-          """);
+          any(), eq(crdPath), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+          .thenReturn(crdCall);
 
       ExecutorService pool = Executors.newFixedThreadPool(2);
       try {
@@ -418,8 +432,7 @@ class ApiResourceDiscoveryTest {
         pool.shutdownNow();
       }
 
-      verifyBuildCallCount("/apis/newgroup.example.io", 1);
-      verifyBuildCallCount("/apis/newgroup.example.io/v1", 1);
+      verifyBuildCallCount(crdPath, 1);
     }
 
     // (d) 기존 히트 경로는 API 호출 없음
@@ -449,32 +462,32 @@ class ApiResourceDiscoveryTest {
       verifyNoBuildCall();
     }
 
-    // 그룹은 존재하지만 요청 리소스가 없음 → miss + 리소스 단위 negative cache.
-    // TTL 내 동일 groupResource 반복 미스가 그룹 재조회를 유발하지 않음.
+    // Established 전의 CRD는 miss로 판정하고 negative cache. TTL 내 재조회 없음.
     @Test
-    void existingGroup_missingResource_negativeCachedPerResource() throws Exception {
-      mockApiCallRepeatable("/apis/qa.example.io", """
+    void crdNotEstablished_judgedMissing() throws Exception {
+      String crdPath = "/apis/apiextensions.k8s.io/v1/customresourcedefinitions/"
+          + "pendings.qa.example.io";
+      mockApiCallRepeatable(crdPath, """
           {
-            "kind": "APIGroup",
-            "name": "qa.example.io",
-            "versions": [{"groupVersion": "qa.example.io/v1", "version": "v1"}]
-          }
-          """);
-      mockApiCallRepeatable("/apis/qa.example.io/v1", """
-          {
-            "resources": [
-              {"name": "widgets", "kind": "Widget", "namespaced": true}
-            ]
+            "spec": {
+              "group": "qa.example.io",
+              "names": {"plural": "pendings", "kind": "Pending"},
+              "scope": "Namespaced",
+              "versions": [{"name": "v1", "served": true, "storage": true}]
+            },
+            "status": {
+              "acceptedNames": {},
+              "conditions": [{"type": "Established", "status": "False"}]
+            }
           }
           """);
 
-      assertThat(discovery.isExist("qa.example.io/gadgets")).isFalse();
-      assertThat(discovery.isExist("qa.example.io/gadgets")).isFalse();
-      // targeted refresh로 병합된 같은 그룹의 실제 리소스는 히트
-      assertThat(discovery.isExist("qa.example.io/widgets")).isTrue();
+      assertThat(discovery.isExist("qa.example.io/pendings")).isFalse();
+      assertThat(discovery.isExist("qa.example.io/pendings")).isFalse();
+      assertThatThrownBy(() -> discovery.isNamespaced("qa.example.io/pendings"))
+          .isInstanceOf(GroupResourceNotFoundException.class);
 
-      verifyBuildCallCount("/apis/qa.example.io", 1);
-      verifyBuildCallCount("/apis/qa.example.io/v1", 1);
+      verifyBuildCallCount(crdPath, 1);
     }
 
     private void mockApiCallRepeatable(String path, String responseBody) throws Exception {

@@ -26,30 +26,28 @@ import org.jspecify.annotations.Nullable;
 @Slf4j
 public class ApiResourceDiscovery {
 
-  /** miss로 확인된 그룹/리소스를 짧게 기억하여 반복 라이브 조회를 막는 negative cache TTL. */
+  /** miss로 확인된 group/resource 조합을 짧게 기억하여 반복 조회를 막는 negative cache TTL. */
   private static final long NEGATIVE_CACHE_TTL_NANOS = TimeUnit.SECONDS.toNanos(15);
   /**
-   * 미스 1건당 targeted refresh 대기 상한. 초과 시 기존 스냅샷 기준으로 판정한다.
-   * 한 웹훅 요청 안에서 서로 다른 그룹 미스가 순차 발생해도 누적 대기가 웹훅
+   * 미스 1건당 CRD 단건 조회 대기 상한. 초과 시 기존 스냅샷 기준으로 판정한다.
+   * 한 웹훅 요청 안에서 서로 다른 조합 미스가 순차 발생해도 누적 대기가 웹훅
    * timeoutSeconds(10초, failurePolicy: Fail) 예산을 넘지 않도록 짧게 유지한다.
-   * 인클러스터 디스커버리 GET 수 회는 정상적으로 수백 ms 내에 끝난다.
+   * 단일 오브젝트 GET은 정상적으로 수십 ms 내에 끝난다.
    */
-  private static final long PER_MISS_REFRESH_WAIT_TIMEOUT_MS = 2_000;
+  private static final long PER_MISS_LOOKUP_WAIT_TIMEOUT_MS = 2_000;
 
   private final ApiClient apiClient;
   private final ObjectMapper mapper;
   private volatile Snapshot snapshot;
   /** 스냅샷 참조 교체(전체 refresh 커밋, targeted 병합)를 직렬화하는 락. 읽기는 락 없이 volatile로. */
   private final Object snapshotWriteLock = new Object();
-  /** 그룹별 진행 중인 targeted refresh. 동일 그룹 동시 미스는 하나의 refresh를 공유한다. */
-  private final ConcurrentHashMap<String, CompletableFuture<Boolean>> inFlightGroupRefreshes =
+  /** group/resource 조합별 진행 중인 CRD 단건 조회. 동일 조합 동시 미스는 하나의 조회를 공유한다. */
+  private final ConcurrentHashMap<String, CompletableFuture<Boolean>> inFlightResourceLookups =
       new ConcurrentHashMap<>();
-  /** API 서버에도 존재하지 않는 그룹의 negative cache. 값은 만료 시각(nanoTime 기준). */
-  private final ConcurrentHashMap<String, Long> negativeGroupCache = new ConcurrentHashMap<>();
-  /** 그룹은 존재하지만 리소스가 없는 groupResource의 negative cache. 값은 만료 시각(nanoTime 기준). */
+  /** CRD가 없거나 서빙되지 않는 group/resource 조합의 negative cache. 값은 만료 시각(nanoTime 기준). */
   private final ConcurrentHashMap<String, Long> negativeGroupResourceCache =
       new ConcurrentHashMap<>();
-  private final ExecutorService targetedRefreshExecutor = createTargetedRefreshExecutor();
+  private final ExecutorService resourceLookupExecutor = createResourceLookupExecutor();
 
   public ApiResourceDiscovery(ApiClient apiClient) {
     this.apiClient = apiClient;
@@ -59,9 +57,9 @@ public class ApiResourceDiscovery {
     updateConfigMap(this.snapshot);
   }
 
-  private static ExecutorService createTargetedRefreshExecutor() {
+  private static ExecutorService createResourceLookupExecutor() {
     return Executors.newCachedThreadPool(runnable -> {
-      Thread thread = new Thread(runnable, "api-resource-discovery-targeted-refresh");
+      Thread thread = new Thread(runnable, "api-resource-discovery-crd-lookup");
       thread.setDaemon(true);
       return thread;
     });
@@ -75,7 +73,6 @@ public class ApiResourceDiscovery {
       this.snapshot = newSnapshot;
     }
     // 전체 refresh가 최신 진실이므로 negative cache를 비워 즉시 재판정 가능하게 한다.
-    this.negativeGroupCache.clear();
     this.negativeGroupResourceCache.clear();
     updateConfigMap(newSnapshot);
     long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
@@ -290,67 +287,64 @@ public class ApiResourceDiscovery {
   }
 
   /**
-   * 스냅샷 미스 시 해당 그룹만 라이브로 targeted refresh 한다.
-   * CRD 생성 직후 주기적 전체 refresh(5분) 전에 들어온 웹훅 요청이 캐시 미스로 거부되는 문제를 해결.
+   * 스냅샷 미스 시 해당 group/resource의 CRD만 이름({@code <plural>.<group>})으로 단건
+   * 조회하여 스냅샷에 병합한다. CRD 생성 직후 주기적 전체 refresh(5분) 전에 들어온 웹훅
+   * 요청이 캐시 미스로 거부되는 문제를, 그룹 전체 디스커버리 없이 요청된 리소스만 조회해서 해결.
    *
-   * <p>동일 그룹에 대한 동시 미스는 in-flight 맵으로 하나의 refresh를 공유하고,
-   * miss로 확인된 그룹/리소스는 짧은 TTL의 negative cache로 반복 라이브 조회를 막는다.
-   * 대기 타임아웃/실패 시에는 기존 스냅샷 기준으로 판정한다(호출부 재조회가 miss 처리).
+   * <p>동일 조합에 대한 동시 미스는 in-flight 맵으로 하나의 조회를 공유하고, miss로 확인된
+   * 조합은 짧은 TTL의 negative cache로 반복 조회를 막는다. 대기 타임아웃/실패 시에는 기존
+   * 스냅샷 기준으로 판정한다(호출부 재조회가 miss 처리).
+   *
+   * <p>CRD가 아닌 aggregated API 리소스는 이 경로로 발견되지 않으며 주기적 전체 refresh에서
+   * 수렴한다.
    */
   private void refreshOnMiss(String groupResource) {
-    String group = extractTargetedRefreshGroup(groupResource);
-    if (group == null) {
-      // 코어 리소스("" 또는 "core" alias)와 형식 오류는 targeted refresh 대상이 아님. 기존 동작 유지.
+    String[] groupAndResource = parseCustomGroupResource(groupResource);
+    if (groupAndResource == null) {
+      // 코어 리소스("" 또는 "core" alias)와 형식 오류는 CRD 조회 대상이 아님. 기존 동작 유지.
       return;
     }
-    if (isNegativeCached(this.negativeGroupCache, group)
-        || isNegativeCached(this.negativeGroupResourceCache, groupResource)) {
+    if (isWithinTtl(this.negativeGroupResourceCache, groupResource)) {
       return;
     }
-    CompletableFuture<Boolean> refreshFuture = this.inFlightGroupRefreshes.computeIfAbsent(group,
-        g -> CompletableFuture
-            .supplyAsync(() -> refreshGroup(g), this.targetedRefreshExecutor)
-            .whenComplete((found, throwable) -> this.inFlightGroupRefreshes.remove(g)));
+    CompletableFuture<Boolean> lookupFuture = this.inFlightResourceLookups.computeIfAbsent(
+        groupResource,
+        gr -> CompletableFuture
+            .supplyAsync(
+                () -> lookupCustomResourceDefinition(gr, groupAndResource[0], groupAndResource[1]),
+                this.resourceLookupExecutor)
+            .whenComplete((found, throwable) -> this.inFlightResourceLookups.remove(gr)));
     try {
-      boolean groupFound = refreshFuture.get(PER_MISS_REFRESH_WAIT_TIMEOUT_MS,
-          TimeUnit.MILLISECONDS);
-      if (groupFound && !this.snapshot.groupResources().contains(groupResource)) {
-        // 그룹은 방금 갱신됐지만 요청된 리소스가 없음 → 리소스 단위 negative cache로 반복 재조회 차단.
-        this.negativeGroupResourceCache.put(groupResource,
-            System.nanoTime() + NEGATIVE_CACHE_TTL_NANOS);
-        log.info("Group refreshed but resource not found, negative-cached: groupResource={}, "
-                + "ttlMs={}",
-            groupResource, TimeUnit.NANOSECONDS.toMillis(NEGATIVE_CACHE_TTL_NANOS));
-      }
+      lookupFuture.get(PER_MISS_LOOKUP_WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS);
     } catch (TimeoutException e) {
-      log.warn("Targeted API discovery refresh wait timed out, judging by current snapshot: "
-              + "group={}, timeoutMs={}", group, PER_MISS_REFRESH_WAIT_TIMEOUT_MS);
+      log.warn("CRD lookup wait timed out, judging by current snapshot: groupResource={}, "
+          + "timeoutMs={}", groupResource, PER_MISS_LOOKUP_WAIT_TIMEOUT_MS);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      log.warn("Interrupted while waiting for targeted API discovery refresh: group={}", group);
+      log.warn("Interrupted while waiting for CRD lookup: groupResource={}", groupResource);
     } catch (ExecutionException e) {
-      log.error("Targeted API discovery refresh failed: group={}", group, e.getCause());
+      log.error("CRD lookup failed: groupResource={}", groupResource, e.getCause());
     }
   }
 
   /**
-   * targeted refresh 대상 그룹을 추출한다.
-   * 코어 리소스(빈 그룹 "/pods" 형태), "core" alias, 구분자 없는 형식 오류는 null 반환.
+   * CRD 단건 조회 대상인 커스텀 group/resource를 {group, resource}로 분해한다.
+   * 코어 리소스(빈 그룹 "/pods" 형태), "core" alias, 형식 오류는 null 반환.
    */
   @Nullable
-  private String extractTargetedRefreshGroup(String groupResource) {
+  private String[] parseCustomGroupResource(String groupResource) {
     int separatorIndex = groupResource.indexOf('/');
-    if (separatorIndex <= 0) {
+    if (separatorIndex <= 0 || separatorIndex == groupResource.length() - 1) {
       return null;
     }
     String group = groupResource.substring(0, separatorIndex);
     if ("core".equals(group)) {
       return null;
     }
-    return group;
+    return new String[] {group, groupResource.substring(separatorIndex + 1)};
   }
 
-  private boolean isNegativeCached(ConcurrentHashMap<String, Long> cache, String key) {
+  private boolean isWithinTtl(ConcurrentHashMap<String, Long> cache, String key) {
     Long deadlineNanos = cache.get(key);
     if (deadlineNanos == null) {
       return false;
@@ -363,67 +357,81 @@ public class ApiResourceDiscovery {
   }
 
   /**
-   * 단일 그룹의 버전/리소스를 라이브 조회하여 스냅샷에 병합한다.
-   * targetedRefreshExecutor 스레드에서 실행되며, 웹훅 대기자들은 이 결과를 공유한다.
+   * CRD를 이름({@code <plural>.<group>})으로 단건 조회하여 해당 리소스만 스냅샷에 병합한다.
+   * resourceLookupExecutor 스레드에서 실행되며, 웹훅 대기자들은 이 결과를 공유한다.
    *
-   * @return 그룹이 API 서버에 존재하고 리소스가 하나 이상 병합되었으면 true
+   * @return CRD가 Established 상태로 존재하여 스냅샷에 병합되었으면 true
    */
-  private boolean refreshGroup(String group) {
-    log.info("Refreshing API resource discovery for missed group: group={}", group);
-    JsonNode groupNode = fetchJson("/apis/" + group);
-    if (groupNode == null) {
-      markGroupMissing(group);
-      return false;
+  private boolean lookupCustomResourceDefinition(String groupResource, String group,
+      String resource) {
+    log.info("Looking up CRD for missed group/resource: groupResource={}", groupResource);
+    JsonNode crd = fetchJson(
+        "/apis/apiextensions.k8s.io/v1/customresourcedefinitions/" + resource + "." + group,
+        true);
+    if (crd == null) {
+      return markResourceMissing(groupResource, "CRD not found on API server");
     }
-    List<String> groupVersionNames = new ArrayList<>();
-    for (JsonNode version : groupNode.path("versions")) {
-      String groupVersion = version.path("groupVersion").textValue();
-      if (groupVersion != null) {
-        groupVersionNames.add(groupVersion);
-      }
+    if (!isCrdEstablished(crd)) {
+      return markResourceMissing(groupResource, "CRD not established");
     }
+
+    JsonNode names = crd.path("status").path("acceptedNames");
+    if (names.path("plural").textValue() == null) {
+      names = crd.path("spec").path("names");
+    }
+    String plural = names.path("plural").textValue();
+    String kind = names.path("kind").textValue();
+    if (plural == null || kind == null) {
+      return markResourceMissing(groupResource, "CRD names are incomplete");
+    }
+    boolean namespaced = "Namespaced".equals(crd.path("spec").path("scope").textValue());
 
     Map<String, String> plurals = new HashMap<>();
-    Map<String, Boolean> namespacedInfo = new HashMap<>();
-    Map<String, String> groupVersions = new HashMap<>();
-    Map<String, List<String>> kindEntries = new HashMap<>();
-    Set<String> groupResources = new HashSet<>();
-    for (String groupVersion : groupVersionNames) {
-      JsonNode resources = fetchJson("/apis/" + groupVersion);
-      if (resources == null) {
-        log.error("Targeted API group/version discovery failed: groupVersion={}", groupVersion);
+    String lastServedGroupVersion = null;
+    for (JsonNode version : crd.path("spec").path("versions")) {
+      if (!version.path("served").booleanValue()) {
         continue;
       }
-      for (JsonNode resource : resources.path("resources")) {
-        String name = resource.path("name").textValue();
-        if (name == null || name.contains("/")) {
-          continue;
-        }
-        String kind = resource.path("kind").textValue();
-        boolean namespaced = resource.path("namespaced").booleanValue();
-
-        String groupResource = group + "/" + name;
-        plurals.put(groupVersion + "/" + kind, name);
-        namespacedInfo.put(groupResource, namespaced);
-        groupVersions.put(groupResource, groupVersion);
-        groupResources.add(groupResource);
-        kindEntries.computeIfAbsent(kind, k -> new ArrayList<>()).add(groupResource);
+      String versionName = version.path("name").textValue();
+      if (versionName == null) {
+        continue;
       }
+      String groupVersion = group + "/" + versionName;
+      plurals.put(groupVersion + "/" + kind, plural);
+      lastServedGroupVersion = groupVersion;
     }
-    if (groupResources.isEmpty()) {
-      markGroupMissing(group);
-      return false;
+    if (lastServedGroupVersion == null) {
+      return markResourceMissing(groupResource, "CRD has no served versions");
     }
-    mergeSnapshot(plurals, namespacedInfo, groupVersions, kindEntries, groupResources);
-    log.info("Targeted API discovery refresh complete: group={}, groupVersions={}, resources={}",
-        group, groupVersionNames.size(), groupResources.size());
+
+    String mergedGroupResource = group + "/" + plural;
+    mergeSnapshot(
+        plurals,
+        Map.of(mergedGroupResource, namespaced),
+        Map.of(mergedGroupResource, lastServedGroupVersion),
+        Map.of(kind, List.of(mergedGroupResource)),
+        Set.of(mergedGroupResource));
+    log.info("CRD lookup merged into snapshot: groupResource={}, servedVersions={}",
+        mergedGroupResource, plurals.size());
     return true;
   }
 
-  private void markGroupMissing(String group) {
-    this.negativeGroupCache.put(group, System.nanoTime() + NEGATIVE_CACHE_TTL_NANOS);
-    log.info("Group not found on API server, negative-cached: group={}, ttlMs={}",
-        group, TimeUnit.NANOSECONDS.toMillis(NEGATIVE_CACHE_TTL_NANOS));
+  private boolean isCrdEstablished(JsonNode crd) {
+    for (JsonNode condition : crd.path("status").path("conditions")) {
+      if ("Established".equals(condition.path("type").textValue())) {
+        return "True".equals(condition.path("status").textValue());
+      }
+    }
+    return false;
+  }
+
+  private boolean markResourceMissing(String groupResource, String reason) {
+    this.negativeGroupResourceCache.put(groupResource,
+        System.nanoTime() + NEGATIVE_CACHE_TTL_NANOS);
+    log.info("Group/resource judged missing, negative-cached: groupResource={}, reason={}, "
+        + "ttlMs={}", groupResource, reason,
+        TimeUnit.NANOSECONDS.toMillis(NEGATIVE_CACHE_TTL_NANOS));
+    return false;
   }
 
   /**
@@ -463,9 +471,9 @@ public class ApiResourceDiscovery {
     }
   }
 
-  /** Spring @Bean inferred destroy method — 컨텍스트 종료 시 targeted refresh executor 정리. */
+  /** Spring @Bean inferred destroy method — 컨텍스트 종료 시 CRD lookup executor 정리. */
   public void shutdown() {
-    this.targetedRefreshExecutor.shutdownNow();
+    this.resourceLookupExecutor.shutdownNow();
   }
 
   @Nullable
@@ -557,6 +565,11 @@ public class ApiResourceDiscovery {
 
   @Nullable
   private JsonNode fetchJson(String path) {
+    return fetchJson(path, false);
+  }
+
+  @Nullable
+  private JsonNode fetchJson(String path, boolean notFoundExpected) {
     try {
       Call call = this.apiClient.buildCall(
           this.apiClient.getBasePath(), path, "GET",
@@ -568,7 +581,11 @@ public class ApiResourceDiscovery {
         int code = response.code();
         if (!response.isSuccessful()) {
           String errorBody = response.body() != null ? response.body().string() : "";
-          log.error("API fetch failed: path={}, status={}, body={}", path, code, errorBody);
+          if (notFoundExpected && code == 404) {
+            log.debug("API fetch returned 404: path={}", path);
+          } else {
+            log.error("API fetch failed: path={}, status={}, body={}", path, code, errorBody);
+          }
           return null;
         }
         if (response.body() == null) {
