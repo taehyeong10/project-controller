@@ -449,10 +449,11 @@ class ApiResourceDiscoveryTest {
       verifyNoBuildCall();
     }
 
-    // 그룹은 존재하지만 요청 리소스가 없음 → miss + 리소스 단위 negative cache.
-    // TTL 내 동일 groupResource 반복 미스가 그룹 재조회를 유발하지 않음.
+    // 그룹은 존재하지만 요청 리소스가 없음 → miss + 그룹 단위 쿨다운.
+    // 쿨다운 내에는 같은 그룹의 어떤 조합 미스도(처음 보는 조합 포함) 그룹 재조회를 다시 유발하지 않음.
+    // RBAC 룰의 그룹×리소스 크로스곱 조회가 없는 조합마다 그룹 재조회를 반복 트리거하던 문제의 검증.
     @Test
-    void existingGroup_missingResource_negativeCachedPerResource() throws Exception {
+    void existingGroup_missingResource_cooldownPreventsRepeatedGroupRefresh() throws Exception {
       mockApiCallRepeatable("/apis/qa.example.io", """
           {
             "kind": "APIGroup",
@@ -470,6 +471,11 @@ class ApiResourceDiscoveryTest {
 
       assertThat(discovery.isExist("qa.example.io/gadgets")).isFalse();
       assertThat(discovery.isExist("qa.example.io/gadgets")).isFalse();
+      // 처음 보는 다른 조합의 미스도 쿨다운 내에는 재조회 없이 즉시 miss
+      assertThat(discovery.isExist("qa.example.io/whatsits")).isFalse();
+      assertThat(discovery.isExist("qa.example.io/doohickeys")).isFalse();
+      assertThatThrownBy(() -> discovery.isNamespaced("qa.example.io/whatsits"))
+          .isInstanceOf(GroupResourceNotFoundException.class);
       // targeted refresh로 병합된 같은 그룹의 실제 리소스는 히트
       assertThat(discovery.isExist("qa.example.io/widgets")).isTrue();
 

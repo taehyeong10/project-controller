@@ -29,6 +29,13 @@ public class ApiResourceDiscovery {
   /** miss로 확인된 그룹/리소스를 짧게 기억하여 반복 라이브 조회를 막는 negative cache TTL. */
   private static final long NEGATIVE_CACHE_TTL_NANOS = TimeUnit.SECONDS.toNanos(15);
   /**
+   * targeted refresh 완료 직후 같은 그룹의 미스가 재조회를 다시 트리거하지 않는 쿨다운.
+   * RBAC 룰의 그룹×리소스 크로스곱 조회처럼 없는 조합이 연달아 들어와도 그룹당 재조회는
+   * 쿨다운마다 최대 1회로 제한된다. 쿨다운 중 새로 생긴 CRD의 인식은 최대 이 시간만큼 늦어질
+   * 수 있으므로 negative cache TTL보다 짧게 유지한다.
+   */
+  private static final long GROUP_REFRESH_COOLDOWN_NANOS = TimeUnit.SECONDS.toNanos(5);
+  /**
    * 미스 1건당 targeted refresh 대기 상한. 초과 시 기존 스냅샷 기준으로 판정한다.
    * 한 웹훅 요청 안에서 서로 다른 그룹 미스가 순차 발생해도 누적 대기가 웹훅
    * timeoutSeconds(10초, failurePolicy: Fail) 예산을 넘지 않도록 짧게 유지한다.
@@ -46,8 +53,8 @@ public class ApiResourceDiscovery {
       new ConcurrentHashMap<>();
   /** API 서버에도 존재하지 않는 그룹의 negative cache. 값은 만료 시각(nanoTime 기준). */
   private final ConcurrentHashMap<String, Long> negativeGroupCache = new ConcurrentHashMap<>();
-  /** 그룹은 존재하지만 리소스가 없는 groupResource의 negative cache. 값은 만료 시각(nanoTime 기준). */
-  private final ConcurrentHashMap<String, Long> negativeGroupResourceCache =
+  /** targeted refresh가 최근 완료된 그룹의 쿨다운. 값은 만료 시각(nanoTime 기준). */
+  private final ConcurrentHashMap<String, Long> refreshedGroupCooldowns =
       new ConcurrentHashMap<>();
   private final ExecutorService targetedRefreshExecutor = createTargetedRefreshExecutor();
 
@@ -74,9 +81,9 @@ public class ApiResourceDiscovery {
     synchronized (this.snapshotWriteLock) {
       this.snapshot = newSnapshot;
     }
-    // 전체 refresh가 최신 진실이므로 negative cache를 비워 즉시 재판정 가능하게 한다.
+    // 전체 refresh가 최신 진실이므로 negative cache와 쿨다운을 비워 즉시 재판정 가능하게 한다.
     this.negativeGroupCache.clear();
-    this.negativeGroupResourceCache.clear();
+    this.refreshedGroupCooldowns.clear();
     updateConfigMap(newSnapshot);
     long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
     log.info("API resource discovery refresh complete: plurals={}, namespacedInfo={}, kinds={}, "
@@ -293,8 +300,9 @@ public class ApiResourceDiscovery {
    * 스냅샷 미스 시 해당 그룹만 라이브로 targeted refresh 한다.
    * CRD 생성 직후 주기적 전체 refresh(5분) 전에 들어온 웹훅 요청이 캐시 미스로 거부되는 문제를 해결.
    *
-   * <p>동일 그룹에 대한 동시 미스는 in-flight 맵으로 하나의 refresh를 공유하고,
-   * miss로 확인된 그룹/리소스는 짧은 TTL의 negative cache로 반복 라이브 조회를 막는다.
+   * <p>동일 그룹에 대한 동시 미스는 in-flight 맵으로 하나의 refresh를 공유한다.
+   * 존재하지 않는 그룹은 짧은 TTL의 negative cache로, 방금 재조회된 그룹은 그룹 단위
+   * 쿨다운으로 반복 라이브 조회를 막는다(쿨다운 내 미스는 신선한 스냅샷 기준의 확정 miss).
    * 대기 타임아웃/실패 시에는 기존 스냅샷 기준으로 판정한다(호출부 재조회가 miss 처리).
    */
   private void refreshOnMiss(String groupResource) {
@@ -303,8 +311,8 @@ public class ApiResourceDiscovery {
       // 코어 리소스("" 또는 "core" alias)와 형식 오류는 targeted refresh 대상이 아님. 기존 동작 유지.
       return;
     }
-    if (isNegativeCached(this.negativeGroupCache, group)
-        || isNegativeCached(this.negativeGroupResourceCache, groupResource)) {
+    if (isWithinTtl(this.negativeGroupCache, group)
+        || isWithinTtl(this.refreshedGroupCooldowns, group)) {
       return;
     }
     CompletableFuture<Boolean> refreshFuture = this.inFlightGroupRefreshes.computeIfAbsent(group,
@@ -315,12 +323,7 @@ public class ApiResourceDiscovery {
       boolean groupFound = refreshFuture.get(PER_MISS_REFRESH_WAIT_TIMEOUT_MS,
           TimeUnit.MILLISECONDS);
       if (groupFound && !this.snapshot.groupResources().contains(groupResource)) {
-        // 그룹은 방금 갱신됐지만 요청된 리소스가 없음 → 리소스 단위 negative cache로 반복 재조회 차단.
-        this.negativeGroupResourceCache.put(groupResource,
-            System.nanoTime() + NEGATIVE_CACHE_TTL_NANOS);
-        log.info("Group refreshed but resource not found, negative-cached: groupResource={}, "
-                + "ttlMs={}",
-            groupResource, TimeUnit.NANOSECONDS.toMillis(NEGATIVE_CACHE_TTL_NANOS));
+        log.debug("Group refreshed but resource not found: groupResource={}", groupResource);
       }
     } catch (TimeoutException e) {
       log.warn("Targeted API discovery refresh wait timed out, judging by current snapshot: "
@@ -350,7 +353,7 @@ public class ApiResourceDiscovery {
     return group;
   }
 
-  private boolean isNegativeCached(ConcurrentHashMap<String, Long> cache, String key) {
+  private boolean isWithinTtl(ConcurrentHashMap<String, Long> cache, String key) {
     Long deadlineNanos = cache.get(key);
     if (deadlineNanos == null) {
       return false;
@@ -415,6 +418,7 @@ public class ApiResourceDiscovery {
       return false;
     }
     mergeSnapshot(plurals, namespacedInfo, groupVersions, kindEntries, groupResources);
+    this.refreshedGroupCooldowns.put(group, System.nanoTime() + GROUP_REFRESH_COOLDOWN_NANOS);
     log.info("Targeted API discovery refresh complete: group={}, groupVersions={}, resources={}",
         group, groupVersionNames.size(), groupResources.size());
     return true;
