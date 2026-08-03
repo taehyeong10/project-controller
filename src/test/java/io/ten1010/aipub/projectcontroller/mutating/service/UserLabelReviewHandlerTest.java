@@ -90,11 +90,11 @@ class UserLabelReviewHandlerTest {
     assertThat(this.handler.canHandle(review)).isFalse();
   }
 
-  // 클러스터 스코프 CR 생성에도 소유자 레이블을 낙인해야 하므로 네임스페이스 없는 CREATE 도 처리한다
+  // 소유권 대상은 전부 네임스페이스 리소스이므로 네임스페이스 없는 요청은 처리하지 않는다
   @Test
-  void canHandle_noNamespace_returnsTrue() {
+  void canHandle_noNamespace_returnsFalse() {
     V1AdmissionReview review = createReview("CREATE", null);
-    assertThat(this.handler.canHandle(review)).isTrue();
+    assertThat(this.handler.canHandle(review)).isFalse();
   }
 
   @Test
@@ -141,43 +141,6 @@ class UserLabelReviewHandlerTest {
 
     UserInfoAnalysis analysis = new UserInfoAnalysis(
         "system:serviceaccount:kube-system:replicaset-controller",
-        List.of("system:serviceaccounts", "system:authenticated"),
-        null);
-    when(this.mockAnalyzer.analyzeV2(any())).thenReturn(analysis);
-
-    this.handler.handle(review);
-
-    assertThat(review.getResponse()).isNotNull();
-    assertThat(review.getResponse().getAllowed()).isTrue();
-    assertThat(review.getResponse().getPatch()).isNull();
-  }
-
-  @Test
-  void handle_memberUserClusterScoped_addsLabels() {
-    V1AdmissionReview review = createReview("CREATE", null);
-
-    V1alpha1AipubUser aipubUser = createAipubUser("testuser", "uid-123", "user-id-456");
-    UserInfoAnalysis analysis = new UserInfoAnalysis(
-        "oidc:testuser",
-        List.of("oidc:aipub-member", "system:authenticated"),
-        aipubUser);
-    when(this.mockAnalyzer.analyzeV2(any())).thenReturn(analysis);
-
-    this.handler.handle(review);
-
-    assertThat(review.getResponse()).isNotNull();
-    assertThat(review.getResponse().getAllowed()).isTrue();
-    assertThat(review.getResponse().getPatch()).isNotNull();
-    assertThat(review.getResponse().getPatchType()).isEqualTo("JSONPatch");
-  }
-
-  // 클러스터 스코프 오브젝트는 오너 레이블 전파 대상이 아니므로 무변경 허용된다
-  @Test
-  void handle_nonMemberClusterScoped_allowsWithoutPatch() {
-    V1AdmissionReview review = createReview("CREATE", null);
-
-    UserInfoAnalysis analysis = new UserInfoAnalysis(
-        "system:serviceaccount:kube-system:some-controller",
         List.of("system:serviceaccounts", "system:authenticated"),
         null);
     when(this.mockAnalyzer.analyzeV2(any())).thenReturn(analysis);

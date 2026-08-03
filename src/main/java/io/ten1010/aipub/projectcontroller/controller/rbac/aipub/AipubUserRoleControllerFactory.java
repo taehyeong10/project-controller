@@ -23,7 +23,7 @@ import io.ten1010.aipub.projectcontroller.domain.k8s.dto.V1alpha1ImageBuild;
 import io.ten1010.aipub.projectcontroller.domain.k8s.dto.V1alpha1Operation;
 import io.ten1010.aipub.projectcontroller.domain.k8s.dto.V1alpha1Project;
 import io.ten1010.aipub.projectcontroller.domain.k8s.dto.V1alpha1SftpServer;
-import io.ten1010.aipub.projectcontroller.informer.dynamic.DynamicCrInformerManager;
+import io.ten1010.aipub.projectcontroller.informer.owned.OwnedObjectInformerManager;
 
 public class AipubUserRoleControllerFactory implements ControllerFactory {
 
@@ -32,19 +32,19 @@ public class AipubUserRoleControllerFactory implements ControllerFactory {
   private final RequestBuilderFactory requestBuilderFactory;
   private final K8sApiProvider k8sApiProvider;
   private final ReconciliationService reconciliationService;
-  private final DynamicCrInformerManager dynamicCrInformerManager;
+  private final OwnedObjectInformerManager ownedObjectInformerManager;
 
   public AipubUserRoleControllerFactory(
       SharedInformerFactory sharedInformerFactory,
       K8sApiProvider k8sApiProvider,
       ReconciliationService reconciliationService,
-      DynamicCrInformerManager dynamicCrInformerManager) {
+      OwnedObjectInformerManager ownedObjectInformerManager) {
     this.sharedInformerFactory = sharedInformerFactory;
     this.onUpdateFilterFactory = new OnUpdateFilterFactory();
     this.requestBuilderFactory = new RequestBuilderFactory(sharedInformerFactory);
     this.k8sApiProvider = k8sApiProvider;
     this.reconciliationService = reconciliationService;
-    this.dynamicCrInformerManager = dynamicCrInformerManager;
+    this.ownedObjectInformerManager = ownedObjectInformerManager;
   }
 
   @Override
@@ -86,13 +86,13 @@ public class AipubUserRoleControllerFactory implements ControllerFactory {
         .watch(this::createSftpServerWatch)
         .watch(this::createImageBuildWatch)
         .withReconciler(new AipubUserRoleReconciler(this.sharedInformerFactory, this.k8sApiProvider,
-            this.reconciliationService, this.dynamicCrInformerManager))
+            this.reconciliationService, this.ownedObjectInformerManager))
         .build();
   }
 
   private ControllerWatch<V1Role> createRoleWatch(WorkQueue<Request> workQueue) {
-    // 동적 CR 이벤트(소유 CR 생성/삭제)가 이 컨트롤러의 큐로 직접 enqueue 되도록 큐를 등록한다
-    this.dynamicCrInformerManager.setAipubUserRoleWorkQueue(workQueue);
+    // 소유 오브젝트 이벤트(생성/삭제/소유권 변경)가 이 컨트롤러의 큐로 직접 enqueue 되도록 큐를 등록한다
+    this.ownedObjectInformerManager.setAipubUserRoleWorkQueue(workQueue);
     DefaultControllerWatch<V1Role> watch = new DefaultControllerWatch<>(workQueue, V1Role.class);
     watch.setOnUpdateFilter(this.onUpdateFilterFactory.aipubUserRoleFilter());
 

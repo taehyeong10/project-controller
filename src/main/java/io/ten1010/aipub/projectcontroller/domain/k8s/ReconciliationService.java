@@ -62,8 +62,6 @@ public class ReconciliationService {
 
   private static final List<String> BASIC_VERBS = List.of("create", "get", "watch", "list");
   private static final List<String> UPDATABLE_VERBS = List.of("update", "patch", "delete");
-  // 임의 CRD 의 소유 CR 은 멤버 Role 에 조회 권한이 없으므로 get 까지 개인 규칙에 포함한다
-  private static final List<String> OWNED_CR_VERBS = List.of("get", "update", "patch", "delete");
   private final SubjectResolver subjectResolver;
   private final DockerConfigJsonResolver dockerConfigJsonResolver;
   private final RoleNameResolver roleNameResolver;
@@ -567,15 +565,6 @@ public class ReconciliationService {
         userWorkspaceReclaims);
   }
 
-  public List<V1PolicyRule> reconcileClusterRoleRules(V1alpha1AipubUser aipubUser,
-      List<OwnedCrObject> ownedCrObjects) {
-    List<V1PolicyRule> reconciled = new ArrayList<>(reconcileClusterRoleRules(aipubUser));
-    for (OwnedCrObject ownedCrObject : ownedCrObjects) {
-      reconciled.add(buildOwnedCrRoleRule(ownedCrObject));
-    }
-    return reconciled;
-  }
-
   @Nullable
   public V1AggregationRule reconcileClusterRoleAggregationRule(V1alpha1Project project,
       ProjectRoleEnum projectRoleEnum) {
@@ -846,11 +835,11 @@ public class ReconciliationService {
       V1alpha1AipubUser aipubUser,
       V1alpha1Project project,
       List<KubernetesObject> workloads,
-      List<OwnedCrObject> ownedCrObjects) {
+      List<OwnedObject> ownedObjects) {
     List<V1PolicyRule> reconciledRules = new ArrayList<>(
         reconcileAipubUserRoleRules(aipubUser, project, workloads));
-    for (OwnedCrObject ownedCrObject : ownedCrObjects) {
-      reconciledRules.add(buildOwnedCrRoleRule(ownedCrObject));
+    for (OwnedObject ownedObject : ownedObjects) {
+      reconciledRules.add(buildOwnedObjectRoleRule(ownedObject));
     }
     return reconciledRules;
   }
@@ -1177,11 +1166,11 @@ public class ReconciliationService {
         .build();
   }
 
-  private V1PolicyRule buildOwnedCrRoleRule(OwnedCrObject ownedCrObject) {
-    return new V1PolicyRuleBuilder().withApiGroups(ownedCrObject.group())
-        .withResources(ownedCrObject.resource())
-        .withVerbs(OWNED_CR_VERBS)
-        .withResourceNames(ownedCrObject.name())
+  private V1PolicyRule buildOwnedObjectRoleRule(OwnedObject ownedObject) {
+    return new V1PolicyRuleBuilder().withApiGroups(ownedObject.group())
+        .withResources(ownedObject.resource())
+        .withVerbs(OwnershipPolicy.OWNED_VERBS)
+        .withResourceNames(ownedObject.name())
         .build();
   }
 
